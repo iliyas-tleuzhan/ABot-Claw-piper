@@ -55,16 +55,16 @@ EOF
 )
 
 tmux new-session -d -s "${SESSION}" -n "piper_driver" "docker exec -it ${CONTAINER} bash"
-tmux send-keys -t "${SESSION}:1" "${piper_driver_cmd}" C-m
+tmux send-keys -t "${SESSION}:piper_driver" "${piper_driver_cmd}" C-m
 
-tmux new-window -t "${SESSION}:2" -n "moveit" "docker exec -it ${CONTAINER} bash"
-tmux send-keys -t "${SESSION}:2" "${moveit_cmd}" C-m
+tmux new-window -t "${SESSION}" -n "moveit" "docker exec -it ${CONTAINER} bash"
+tmux send-keys -t "${SESSION}:moveit" "${moveit_cmd}" C-m
 
-tmux new-window -t "${SESSION}:3" -n "action_server" "docker exec -it ${CONTAINER} bash"
-tmux send-keys -t "${SESSION}:3" "${action_server_cmd}" C-m
+tmux new-window -t "${SESSION}" -n "action_server" "docker exec -it ${CONTAINER} bash"
+tmux send-keys -t "${SESSION}:action_server" "${action_server_cmd}" C-m
 
-tmux new-window -t "${SESSION}:4" -n "tests" "docker exec -it ${CONTAINER} bash"
-tmux send-keys -t "${SESSION}:4" "${tests_cmd}" C-m
+tmux new-window -t "${SESSION}" -n "tests" "docker exec -it ${CONTAINER} bash"
+tmux send-keys -t "${SESSION}:tests" "${tests_cmd}" C-m
 
-tmux select-window -t "${SESSION}:1"
+tmux select-window -t "${SESSION}:piper_driver"
 exec tmux attach-session -t "${SESSION}"
