@@ -42,6 +42,41 @@ openclaw agent --message "Open the Piper gripper."
 openclaw agent --message "Close the Piper gripper."
 ```
 
+## RealSense Color Pick-Place Demo
+
+Start the D555 top-down camera in another container terminal:
+
+```bash
+cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+./start_realsense_d555.sh
+```
+
+Check RGB, aligned depth, and camera info:
+
+```bash
+./check_realsense_topics.sh
+```
+
+Run color detection only:
+
+```bash
+./today_red_to_purple_pick_place.py
+```
+
+The movement path is deliberately gated. Before robot motion, create a real calibration file:
+
+```bash
+cp camera_to_base.example.yaml camera_to_base.yaml
+```
+
+Replace the example identity matrix with a measured `camera_to_base` transform. Then execute the today-only demo:
+
+```bash
+./today_red_to_purple_pick_place.py --execute
+```
+
+Do not use `camera_to_base.example.yaml` for movement.
+
 ## Required Terminals
 
 1. Piper ROS driver:
