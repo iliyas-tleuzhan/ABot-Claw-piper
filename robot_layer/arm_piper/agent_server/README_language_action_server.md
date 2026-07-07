@@ -44,11 +44,11 @@ openclaw agent --message "Close the Piper gripper."
 
 ## RealSense Color Pick-Place Demo
 
-Start the D555 top-down camera in another container terminal:
+Start the D555 top-down camera in another container terminal. It publishes under `/table_camera` by default:
 
 ```bash
 cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
-./start_realsense_d555.sh
+./start_realsense_d555_py.sh
 ```
 
 Check RGB, aligned depth, and camera info:
