@@ -38,8 +38,8 @@ source /opt/ros/noetic/setup.bash
 source devel/setup.bash
 echo "Waiting for ROS master from Piper driver..."
 until rostopic list >/dev/null 2>&1; do sleep 1; done
-echo "Waiting for /joint_states_single..."
-until rostopic list 2>/dev/null | grep -qx "/joint_states_single"; do sleep 1; done
+echo "Waiting for live /joint_states_single messages..."
+until timeout 3 rostopic echo -n 1 /joint_states_single >/dev/null 2>&1; do sleep 1; done
 roslaunch piper_with_gripper_moveit demo.launch use_rviz:=false
 exec bash
 EOF
@@ -51,8 +51,8 @@ source /opt/ros/noetic/setup.bash
 source robot_driver_ros/devel/setup.bash
 echo "Waiting for ROS master from Piper driver..."
 until rostopic list >/dev/null 2>&1; do sleep 1; done
-echo "Waiting for /joint_states_single..."
-until rostopic list 2>/dev/null | grep -qx "/joint_states_single"; do sleep 1; done
+echo "Waiting for live /joint_states_single messages..."
+until timeout 3 rostopic echo -n 1 /joint_states_single >/dev/null 2>&1; do sleep 1; done
 ./start_piper_language_action_server.sh
 exec bash
 EOF
