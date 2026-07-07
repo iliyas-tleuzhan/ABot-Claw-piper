@@ -6,10 +6,16 @@ It does not use camera, YOLO, GraspAnything, pick-and-place, `/end_pose`, or ABo
 
 ## Restarting After Closing All Tabs
 
+Docker path prerequisite after the repo move:
+
+```text
+/home/dase-hw101/ABot-Claw:/root/ABot-Claw
+```
+
 Option A: tmux startup
 
 ```bash
-cd ~/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+cd ~/ABot-Claw/robot_layer/arm_piper/agent_server
 ./start_piper_language_stack_tmux.sh
 ```
 
@@ -36,10 +42,10 @@ Then safe optional tests:
 OpenClaw language tests:
 
 ```bash
-openclaw agent --message "Move the Piper arm up."
-openclaw agent --message "Move the Piper arm down."
-openclaw agent --message "Open the Piper gripper."
-openclaw agent --message "Close the Piper gripper."
+openclaw agent --agent main --message "Move the Piper arm up."
+openclaw agent --agent main --message "Move the Piper arm down."
+openclaw agent --agent main --message "Open the Piper gripper."
+openclaw agent --agent main --message "Close the Piper gripper."
 ```
 
 ## RealSense Color Pick-Place Demo
@@ -47,7 +53,7 @@ openclaw agent --message "Close the Piper gripper."
 Start the D555 top-down camera in another container terminal. It publishes under `/table_camera` by default:
 
 ```bash
-cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
 ./start_realsense_d555_py.sh
 ```
 
@@ -83,7 +89,7 @@ Do not use `camera_to_base.example.yaml` for movement.
 
    ```bash
    docker exec -it abot-piper-noetic bash
-   cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros/src/piper_ros
+   cd /root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros/src/piper_ros
    source /opt/ros/noetic/setup.bash
    source ../../devel/setup.bash
    roslaunch piper start_single_piper.launch can_port:=can0 auto_enable:=true
@@ -93,7 +99,7 @@ Do not use `camera_to_base.example.yaml` for movement.
 
    ```bash
    docker exec -it abot-piper-noetic bash
-   cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
+   cd /root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
    source /opt/ros/noetic/setup.bash
    source devel/setup.bash
    roslaunch piper_with_gripper_moveit demo.launch use_rviz:=false
@@ -103,7 +109,7 @@ Do not use `camera_to_base.example.yaml` for movement.
 
    ```bash
    docker exec -it abot-piper-noetic bash
-   cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+   cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
    ./start_piper_language_action_server.sh
    ```
 
@@ -181,12 +187,12 @@ Terminal 1:
 
 ```bash
 docker exec -it abot-piper-noetic bash
-cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
 source /opt/ros/noetic/setup.bash
 source devel/setup.bash
 cd src/piper_ros
 bash can_activate.sh can0 1000000
-cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
 roslaunch piper start_single_piper.launch can_port:=can0 auto_enable:=true
 ```
 
@@ -194,7 +200,7 @@ Terminal 2:
 
 ```bash
 docker exec -it abot-piper-noetic bash
-cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros
 source /opt/ros/noetic/setup.bash
 source devel/setup.bash
 roslaunch piper_with_gripper_moveit demo.launch use_rviz:=false
@@ -204,7 +210,7 @@ Terminal 3:
 
 ```bash
 docker exec -it abot-piper-noetic bash
-cd /root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
 ./start_piper_language_action_server.sh
 ```
 
@@ -221,7 +227,7 @@ curl http://localhost:8891/state
 OpenClaw host test:
 
 ```bash
-cd ~/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+cd ~/ABot-Claw/robot_layer/arm_piper/agent_server
 ./test_openclaw_piper_action.sh
-openclaw agent --message "Move the Piper arm up."
+openclaw agent --agent main --message "Move the Piper arm up."
 ```

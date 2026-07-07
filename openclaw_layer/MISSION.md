@@ -24,7 +24,7 @@ Do not jump straight into code. First decide **which robot should own the task**
 
 A good skill agent for this fleet should separate tasks into:
 
-1. **Manipulation-first tasks** → likely Piper
+1. **Manipulation-first tasks** → Piper: fixed-base manipulation tasks
 2. **Whole-body or human-environment interaction tasks** → likely G1
 3. **Mobility, patrol, inspection, following, scene scouting** → likely Go2
 4. **Cross-robot workflows** → split into stages and route each stage to the right platform

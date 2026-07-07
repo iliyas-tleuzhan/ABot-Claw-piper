@@ -3,12 +3,19 @@ set -eo pipefail
 
 SESSION="piper_language_stack"
 CONTAINER="abot-piper-noetic"
-STACK_DIR="/root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server"
+STACK_DIR="/root/ABot-Claw/robot_layer/arm_piper/agent_server"
 ROS_WS="${STACK_DIR}/robot_driver_ros"
 ATTACH="${PIPER_TMUX_ATTACH:-1}"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux is not installed. Install it with: sudo apt install tmux"
+  exit 1
+fi
+
+if ! docker exec "${CONTAINER}" test -d "${STACK_DIR}" >/dev/null 2>&1; then
+  echo "Container ${CONTAINER} cannot see ${STACK_DIR}"
+  echo "The repo was moved to ~/ABot-Claw; recreate or remount the container with:"
+  echo "  -v /home/dase-hw101/ABot-Claw:/root/ABot-Claw"
   exit 1
 fi
 

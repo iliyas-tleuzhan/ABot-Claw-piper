@@ -33,6 +33,7 @@ It will:
 workspace/
 ├── MISSION.md      # Multi-robot mission and decision rules
 ├── ROBOT.md        # Fleet overview: Piper + Unitree G1 + Unitree Go2
+├── SERVICE.md      # Shared service host and service registry
 ├── HEARTBEAT.md    # Periodic checks for skill progress and fleet readiness
 ├── skills/         # AbotClaw-specific hardware and skill workflows
 └── docs/           # SDK discovery and operator reference notes

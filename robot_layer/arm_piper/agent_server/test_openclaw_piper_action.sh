@@ -52,15 +52,15 @@ echo "PASS openclaw gateway restart"
 cat <<'EOF'
 
 Suggested manual commands:
-openclaw agent --message "Move the Piper arm up."
-openclaw agent --message "Move the Piper arm down."
-openclaw agent --message "Open the Piper gripper."
-openclaw agent --message "Close the Piper gripper."
+openclaw agent --agent main --message "Move the Piper arm up."
+openclaw agent --agent main --message "Move the Piper arm down."
+openclaw agent --agent main --message "Open the Piper gripper."
+openclaw agent --agent main --message "Close the Piper gripper."
 EOF
 
 if [[ "${RUN_OPENCLAW}" -eq 1 ]]; then
   echo "Running one safe OpenClaw command..."
-  openclaw agent --message "Move the Piper arm up."
+  openclaw agent --agent main --message "Move the Piper arm up."
 else
   echo "SKIP OpenClaw robot command; pass --run to execute one safe command."
 fi

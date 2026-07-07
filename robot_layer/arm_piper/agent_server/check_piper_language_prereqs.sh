@@ -4,6 +4,7 @@ set -eo pipefail
 CONTAINER="abot-piper-noetic"
 PORT="8891"
 OLD_PORT="8890"
+CONTAINER_REPO="/root/ABot-Claw"
 
 if command -v docker >/dev/null 2>&1; then
   echo "PASS Docker command exists"
@@ -18,13 +19,19 @@ if docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
   if [[ "${state}" != "running" ]]; then
     echo "Container is stopped. Start it with:"
     echo "docker start ${CONTAINER}"
+  elif docker exec "${CONTAINER}" test -d "${CONTAINER_REPO}" >/dev/null 2>&1; then
+    echo "PASS container repo path exists: ${CONTAINER_REPO}"
+  else
+    echo "WARNING: container cannot see ${CONTAINER_REPO}"
+    echo "The repo now lives at ~/ABot-Claw. Recreate or remount ${CONTAINER} with:"
+    echo "  -v /home/dase-hw101/ABot-Claw:/root/ABot-Claw"
   fi
 else
   echo "FAIL container ${CONTAINER} does not exist"
   exit 1
 fi
 
-if curl -fsS --max-time 2 "http://localhost:${PORT}/health" >/dev/null 2>&1; then
+if curl --noproxy '*' -fsS --max-time 2 "http://localhost:${PORT}/health" >/dev/null 2>&1; then
   echo "PASS port ${PORT} responds to /health"
 else
   echo "INFO port ${PORT} is not responding to /health"

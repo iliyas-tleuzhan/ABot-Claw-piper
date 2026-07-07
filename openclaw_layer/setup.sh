@@ -2,6 +2,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE_SOURCE_DIR="$SCRIPT_DIR/workspace"
+if [ ! -d "$WORKSPACE_SOURCE_DIR" ]; then
+    WORKSPACE_SOURCE_DIR="$SCRIPT_DIR"
+fi
 
 FRESH=false
 for arg in "$@"; do
@@ -55,16 +59,19 @@ fi
 
 echo "Copying AbotClaw workspace files..."
 mkdir -p ~/.openclaw/workspace ~/.openclaw/workspace/skills ~/.openclaw/workspace/docs
-cp "$SCRIPT_DIR/workspace/MISSION.md" ~/.openclaw/workspace/
-cp "$SCRIPT_DIR/workspace/ROBOT.md" ~/.openclaw/workspace/
-cp "$SCRIPT_DIR/workspace/HEARTBEAT.md" ~/.openclaw/workspace/
-if [ -d "$SCRIPT_DIR/workspace/skills" ]; then
-    cp -R "$SCRIPT_DIR/workspace/skills/." ~/.openclaw/workspace/skills/
+cp "$WORKSPACE_SOURCE_DIR/MISSION.md" ~/.openclaw/workspace/
+cp "$WORKSPACE_SOURCE_DIR/ROBOT.md" ~/.openclaw/workspace/
+cp "$WORKSPACE_SOURCE_DIR/HEARTBEAT.md" ~/.openclaw/workspace/
+if [ -f "$WORKSPACE_SOURCE_DIR/SERVICE.md" ]; then
+    cp "$WORKSPACE_SOURCE_DIR/SERVICE.md" ~/.openclaw/workspace/
 fi
-if [ -d "$SCRIPT_DIR/workspace/docs" ]; then
-    cp -R "$SCRIPT_DIR/workspace/docs/." ~/.openclaw/workspace/docs/
+if [ -d "$WORKSPACE_SOURCE_DIR/skills" ]; then
+    cp -R "$WORKSPACE_SOURCE_DIR/skills/." ~/.openclaw/workspace/skills/
 fi
-echo "  Copied MISSION.md, ROBOT.md, HEARTBEAT.md, skills/, docs/"
+if [ -d "$WORKSPACE_SOURCE_DIR/docs" ]; then
+    cp -R "$WORKSPACE_SOURCE_DIR/docs/." ~/.openclaw/workspace/docs/
+fi
+echo "  Copied MISSION.md, ROBOT.md, HEARTBEAT.md, SERVICE.md when present, skills/, docs/"
 
 echo "Patching AGENTS.md with AbotClaw session checklist..."
 python3 << 'PATCHEOF'

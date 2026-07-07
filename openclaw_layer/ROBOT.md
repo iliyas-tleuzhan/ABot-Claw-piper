@@ -15,14 +15,14 @@ Fill only the **Base URL** column. The guide and SDK URLs are derived from it.
 
 | Robot       | Base URL           | Getting-started guide              | SDK reference                        |
 | ----------- | ------------------ | ---------------------------------- | ------------------------------------ |
-| Piper       | `<PIPER_BASE_URL>` | `<PIPER_BASE_URL>/docs/guide/html` | `<PIPER_BASE_URL>/code/sdk/markdown` |
+| Piper       | `http://localhost:8891` | `http://localhost:8891/health` | `http://localhost:8891/state` |
 | Unitree G1  | `<G1_BASE_URL>`    | `<G1_BASE_URL>/docs/guide/html`    | `<G1_BASE_URL>/code/sdk/markdown`    |
 | Unitree Go2 | `<GO2_BASE_URL>`   | `<GO2_BASE_URL>/docs/guide/html`   | `<GO2_BASE_URL>/code/sdk/markdown`   |
 
 
 ### Recommended placeholders
 
-- `PIPER_BASE_URL=http://<PIPER_HOST>:<PIPER_PORT>`
+- `PIPER_BASE_URL=http://localhost:8891`
 - `G1_BASE_URL=http://<G1_HOST>:<G1_PORT>`
 - `GO2_BASE_URL=http://<GO2_HOST>:<GO2_PORT>`
 
@@ -78,7 +78,7 @@ For any robot-facing coding task:
 
 Fill these in before serious deployment:
 
-- Control/API endpoint for Piper:
+- Control/API endpoint for Piper: `http://localhost:8891`
 - Control/API endpoint for Unitree G1:
 - Control/API endpoint for Unitree Go2:
 - Auth method / API key details:
@@ -94,4 +94,3 @@ Every robot-facing skill should state:
 2. What assumptions it makes about sensors and actuators
 3. What safety checks should happen before execution
 4. Whether it can run unattended or needs supervision
-
