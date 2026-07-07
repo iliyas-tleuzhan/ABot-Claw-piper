@@ -4,6 +4,44 @@ This is a no-camera language/action control layer for AgileX Piper. It only maps
 
 It does not use camera, YOLO, GraspAnything, pick-and-place, `/end_pose`, or ABot `/code/execute`.
 
+## Restarting After Closing All Tabs
+
+Option A: tmux startup
+
+```bash
+cd ~/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server
+./start_piper_language_stack_tmux.sh
+```
+
+Option B: print manual commands
+
+```bash
+./print_piper_language_startup_commands.sh
+```
+
+First tests after startup:
+
+```bash
+curl http://localhost:8891/health
+curl http://localhost:8891/state
+```
+
+Then safe optional tests:
+
+```bash
+./test_piper_language_action_server.sh --gripper
+./test_piper_language_action_server.sh --move
+```
+
+OpenClaw language tests:
+
+```bash
+openclaw agent --message "Move the Piper arm up."
+openclaw agent --message "Move the Piper arm down."
+openclaw agent --message "Open the Piper gripper."
+openclaw agent --message "Close the Piper gripper."
+```
+
 ## Required Terminals
 
 1. Piper ROS driver:
