@@ -5,6 +5,7 @@ SESSION="piper_language_stack"
 CONTAINER="abot-piper-noetic"
 STACK_DIR="/root/Iliyas/abot/ABot-Claw/robot_layer/arm_piper/agent_server"
 ROS_WS="${STACK_DIR}/robot_driver_ros"
+ATTACH="${PIPER_TMUX_ATTACH:-1}"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux is not installed. Install it with: sudo apt install tmux"
@@ -12,6 +13,10 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 if tmux has-session -t "${SESSION}" 2>/dev/null; then
+  if [[ "${ATTACH}" == "0" ]]; then
+    echo "tmux session ${SESSION} is already running"
+    exit 0
+  fi
   exec tmux attach-session -t "${SESSION}"
 fi
 
@@ -81,4 +86,9 @@ tmux new-window -t "${SESSION}" -n "action_server" "$(docker_shell "${action_ser
 tmux new-window -t "${SESSION}" -n "tests" "$(docker_shell "${tests_cmd}")"
 
 tmux select-window -t "${SESSION}:piper_driver"
+if [[ "${ATTACH}" == "0" ]]; then
+  echo "Started tmux session ${SESSION}"
+  echo "Attach with: tmux attach -t ${SESSION}"
+  exit 0
+fi
 exec tmux attach-session -t "${SESSION}"
