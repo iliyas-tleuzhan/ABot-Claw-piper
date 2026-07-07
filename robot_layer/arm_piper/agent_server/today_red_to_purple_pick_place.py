@@ -28,9 +28,9 @@ from robot_sdk.piper_sdk import PiperRobotEnv
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CALIBRATION = os.path.join(SCRIPT_DIR, "camera_to_base.yaml")
-DEFAULT_COLOR_TOPIC = "/wrist_camera/color/image_raw"
-DEFAULT_DEPTH_TOPIC = "/wrist_camera/aligned_depth_to_color/image_raw"
-DEFAULT_INFO_TOPIC = "/wrist_camera/color/camera_info"
+DEFAULT_COLOR_TOPIC = "/table_camera/color/image_raw"
+DEFAULT_DEPTH_TOPIC = "/table_camera/aligned_depth_to_color/image_raw"
+DEFAULT_INFO_TOPIC = "/table_camera/color/camera_info"
 
 
 @dataclass

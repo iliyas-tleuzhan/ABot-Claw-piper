@@ -7,7 +7,7 @@ export ROS_HOSTNAME="${ROS_HOSTNAME:-localhost}"
 source /opt/ros/noetic/setup.bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/robot_driver_ros/devel/setup.bash"
 
-CAMERA_NAME="${REALSENSE_CAMERA_NAME:-wrist_camera}"
+CAMERA_NAME="${REALSENSE_CAMERA_NAME:-table_camera}"
 COLOR_TOPIC="/${CAMERA_NAME}/color/image_raw"
 DEPTH_TOPIC="/${CAMERA_NAME}/aligned_depth_to_color/image_raw"
 INFO_TOPIC="/${CAMERA_NAME}/color/camera_info"

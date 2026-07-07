@@ -10,7 +10,7 @@ export ROS_HOSTNAME="${ROS_HOSTNAME:-localhost}"
 source /opt/ros/noetic/setup.bash
 source "${ROS_WS}/devel/setup.bash"
 
-CAMERA_NAME="${REALSENSE_CAMERA_NAME:-wrist_camera}"
+CAMERA_NAME="${REALSENSE_CAMERA_NAME:-table_camera}"
 DEVICE_TYPE="${REALSENSE_DEVICE_TYPE:-d555}"
 COLOR_WIDTH="${REALSENSE_COLOR_WIDTH:-640}"
 COLOR_HEIGHT="${REALSENSE_COLOR_HEIGHT:-480}"
