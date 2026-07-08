@@ -24,8 +24,7 @@ SERVER_MARKER = "piper_language_action_server_v1"
 SERVER_REVISION = "ros_state_cache_20260706"
 DEFAULT_PORT = 8891
 JOINT_STATE_TOPIC = os.environ.get("PIPER_JOINT_STATE_TOPIC", "/joint_states_single")
-MAX_JOINT_STEP_RAD = 0.08
-DEFAULT_JOINT_STEP_RAD = 0.04
+DEFAULT_JOINT_STEP_RAD = 0.08
 DEFAULT_SPEED = 0.05
 DEFAULT_ACCELERATION = 0.05
 DEFAULT_GRIPPER_OPEN = 0.04
@@ -84,10 +83,6 @@ def get_robot() -> PiperRobotEnv:
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
-
-
-def clamp_joint_step(joint_step: float) -> float:
-    return clamp(abs(float(joint_step)), 0.0, MAX_JOINT_STEP_RAD)
 
 
 def joint_state_callback(msg: JointState) -> None:
@@ -202,7 +197,7 @@ def move_joint2_joint3(direction: str, req: MoveRequest) -> Dict[str, Any]:
             error=f"PiperRobotEnv initialization failed: {repr(exc)}",
             ros_diagnostics=ros_diagnostics(),
         )
-    joint_step = clamp_joint_step(req.joint_step)
+    joint_step = abs(float(req.joint_step))
 
     with robot_lock:
         try:

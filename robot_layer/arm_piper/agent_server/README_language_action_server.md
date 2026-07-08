@@ -160,7 +160,7 @@ Move arm up using the calibrated safe joint nudge:
 ```bash
 curl -X POST http://localhost:8891/move_up \
   -H 'Content-Type: application/json' \
-  -d '{"joint_step":0.04,"speed":0.05,"accel":0.05}'
+  -d '{"joint_step":0.08,"speed":0.05,"accel":0.05}'
 ```
 
 Move arm down using the reverse nudge:
@@ -168,7 +168,7 @@ Move arm down using the reverse nudge:
 ```bash
 curl -X POST http://localhost:8891/move_down \
   -H 'Content-Type: application/json' \
-  -d '{"joint_step":0.04,"speed":0.05,"accel":0.05}'
+  -d '{"joint_step":0.08,"speed":0.05,"accel":0.05}'
 ```
 
 Optional direct gripper position:
@@ -179,7 +179,7 @@ curl -X POST http://localhost:8891/set_gripper \
   -d '{"position":0.03,"speed":0.05,"accel":0.05}'
 ```
 
-`joint_step` is hard-capped at `0.08` radians. `move_up` applies `q[1] += joint_step` and `q[2] -= joint_step`; `move_down` applies the reverse.
+`joint_step` is used as requested, without an application-level cap. `move_up` applies `q[1] += abs(joint_step)` and `q[2] -= abs(joint_step)`; `move_down` applies the reverse. MoveIt, controller, and hardware joint limits may still reject unreachable or unsafe targets.
 
 ## Working Daily Startup
 
