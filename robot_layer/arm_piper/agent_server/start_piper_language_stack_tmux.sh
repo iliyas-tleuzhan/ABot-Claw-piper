@@ -12,6 +12,19 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
+  echo "Container ${CONTAINER} does not exist."
+  echo "Create it with the repo mounted at:"
+  echo "  -v /home/dase-hw101/ABot-Claw:/root/ABot-Claw"
+  exit 1
+fi
+
+container_state="$(docker inspect -f '{{.State.Status}}' "${CONTAINER}")"
+if [[ "${container_state}" != "running" ]]; then
+  echo "Starting stopped container ${CONTAINER} (${container_state})..."
+  docker start "${CONTAINER}" >/dev/null
+fi
+
 if ! docker exec "${CONTAINER}" test -d "${STACK_DIR}" >/dev/null 2>&1; then
   echo "Container ${CONTAINER} cannot see ${STACK_DIR}"
   echo "The repo was moved to ~/ABot-Claw; recreate or remount the container with:"

@@ -26,3 +26,4 @@ Notes:
 - Do not use ABot `/code/execute`.
 - Do not use `/end_pose` for action control.
 - Safe language-action endpoints are `POST /move_up`, `POST /move_down`, `POST /open_gripper`, and `POST /close_gripper`.
+- For `move_up` and `move_down`, pass the user-requested `joint_step` with `{"speed":0.05,"accel":0.05}`; the server does not apply an application-level joint-step cap.
