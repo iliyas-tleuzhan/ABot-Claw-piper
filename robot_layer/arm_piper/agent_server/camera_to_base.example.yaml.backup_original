@@ -1,0 +1,7 @@
+# Copy to camera_to_base.yaml after real calibration.
+# Do not use this identity example for robot motion.
+camera_to_base:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0, 0.0]
+  - [0.0, 0.0, 1.0, 0.0]
+  - [0.0, 0.0, 0.0, 1.0]
