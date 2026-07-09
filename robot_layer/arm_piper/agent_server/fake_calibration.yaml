@@ -1,0 +1,8 @@
+# FAKE TEST CALIBRATION ONLY
+# Random values for pipeline loading test.
+# Do not use for real pick-and-place.
+camera_to_base:
+  - [0.9999955, -0.0029999955, 0.0, 0.01]
+  - [0.0029999955, 0.9999955, 0.0, -0.02]
+  - [0.0, 0.0, 1.0, 0.03]
+  - [0.0, 0.0, 0.0, 1.0]
