@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--serial", default="")
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=360)
-    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--fps", type=int, default=15)
     return p.parse_args()
 
 
