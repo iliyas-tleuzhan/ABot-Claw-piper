@@ -15,7 +15,14 @@ ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 class PiperTrajectoryBridge:
     def __init__(self) -> None:
         self.command_topic = rospy.get_param("~command_topic", "/piper_joint_commands")
+        self.feedback_topic = rospy.get_param("~feedback_topic", "/joint_states_single")
+        self.feedback_tolerance_rad = rospy.get_param("~feedback_tolerance_rad", 0.02)
+        self.feedback_timeout_s = rospy.get_param("~feedback_timeout_s", 15.0)
+        self.latest_positions = {}
         self.command_publisher = rospy.Publisher(self.command_topic, JointState, queue_size=1)
+        self.feedback_subscriber = rospy.Subscriber(
+            self.feedback_topic, JointState, self.on_feedback, queue_size=1
+        )
         self.server = actionlib.SimpleActionServer(
             "arm_controllers/follow_joint_trajectory",
             FollowJointTrajectoryAction,
@@ -24,13 +31,34 @@ class PiperTrajectoryBridge:
         )
         self.server.start()
         rospy.loginfo(
-            "Piper trajectory bridge ready: MoveIt arm trajectories publish to %s", self.command_topic
+            "Piper trajectory bridge ready: MoveIt arm trajectories publish to %s and wait for %s",
+            self.command_topic,
+            self.feedback_topic,
         )
+
+    def on_feedback(self, state: JointState) -> None:
+        self.latest_positions = dict(zip(state.name, state.position))
 
     def reject(self, result: FollowJointTrajectoryResult, message: str) -> None:
         result.error_code = FollowJointTrajectoryResult.INVALID_JOINTS
         result.error_string = message
         self.server.set_aborted(result, message)
+
+    def wait_for_final_position(self, target_positions) -> bool:
+        deadline = rospy.Time.now() + rospy.Duration(self.feedback_timeout_s)
+        rate = rospy.Rate(50)
+        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+            if self.server.is_preempt_requested():
+                self.server.set_preempted(text="Trajectory preempted")
+                return False
+            if all(
+                name in self.latest_positions
+                and abs(self.latest_positions[name] - target) <= self.feedback_tolerance_rad
+                for name, target in zip(ARM_JOINTS, target_positions)
+            ):
+                return True
+            rate.sleep()
+        return False
 
     def execute(self, goal) -> None:
         trajectory = goal.trajectory
@@ -64,11 +92,18 @@ class PiperTrajectoryBridge:
             feedback.joint_names = list(ARM_JOINTS)
             feedback.desired.positions = list(point.positions)
             feedback.desired.time_from_start = point.time_from_start
-            feedback.actual = feedback.desired
+            feedback.actual.positions = [self.latest_positions.get(name, 0.0) for name in ARM_JOINTS]
+            feedback.actual.time_from_start = point.time_from_start
             self.server.publish_feedback(feedback)
 
+        if not self.wait_for_final_position(trajectory.points[-1].positions):
+            result.error_code = FollowJointTrajectoryResult.GOAL_TOLERANCE_VIOLATED
+            result.error_string = "Timed out waiting for Piper joint feedback at final trajectory point"
+            self.server.set_aborted(result, result.error_string)
+            return
+
         result.error_code = FollowJointTrajectoryResult.SUCCESSFUL
-        self.server.set_succeeded(result, "Trajectory commands published to Piper driver")
+        self.server.set_succeeded(result, "Piper joint feedback reached final trajectory point")
 
 
 def main() -> int:
