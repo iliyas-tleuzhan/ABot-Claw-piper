@@ -120,11 +120,6 @@ piper_driver_cmd=$(cat <<EOF
 ${ROS_ENV}
 cd ${ROS_WS}
 
-if rosnode list 2>/dev/null | grep -qx /piper_ctrl_single_node; then
-  echo "Piper driver node already exists; reusing it."
-  exec bash
-fi
-
 ip link set can0 down 2>/dev/null || true
 ip link set can0 type can bitrate 1000000
 ip link set can0 txqueuelen 1000
@@ -141,6 +136,25 @@ rosrun piper piper_ctrl_single_node.py \
   joint_ctrl_single:=/piper_joint_commands
 EOF
 )
+
+stop_stack_processes() {
+    # Scope this to ABot-Claw processes inside the selected container.  This is
+    # needed because killing tmux alone does not reliably terminate docker exec
+    # children that own ROS nodes or the CAN device.
+    docker exec "${CONTAINER}" bash -lc '
+        pkill -f "[p]iper_ctrl_single_node.py" || true
+        pkill -f "[p]iper_joint_state_relay.py" || true
+        pkill -f "[p]iper_trajectory_bridge.py" || true
+        pkill -f "[r]ealsense_d555_py_publisher.py" || true
+        pkill -f "[r]ealsense2_camera" || true
+        pkill -f "[f]ake_aligned_depth_from_raw.py" || true
+        pkill -f "[j]oint_moveit_ctrl_server.py" || true
+        pkill -f "[m]ove_group" || true
+        pkill -f "[r]oscore" || true
+        pkill -f "[r]osmaster" || true
+        pkill -f "[r]osout" || true
+    ' >/dev/null 2>&1 || true
+}
 
 joint_state_relay_cmd=$(cat <<EOF
 ${ROS_ENV}
@@ -341,7 +355,8 @@ main() {
         require_command tmux
         if tmux has-session -t "${SESSION}" 2>/dev/null; then
             tmux kill-session -t "${SESSION}"
-            echo "Stopped tmux session ${SESSION}. Docker container remains running."
+            stop_stack_processes
+            echo "Stopped tmux session ${SESSION} and ABot-Claw container processes. Docker container remains running."
         else
             echo "tmux session ${SESSION} is not running."
         fi
@@ -369,6 +384,10 @@ main() {
             echo "tmux session ${SESSION} already exists; attaching without starting duplicate services."
             exec tmux attach-session -t "${SESSION}"
         fi
+    fi
+
+    if [[ "${restart}" == true ]]; then
+        stop_stack_processes
     fi
 
     echo "WARNING: This starts infrastructure only. It does not move the robot."
