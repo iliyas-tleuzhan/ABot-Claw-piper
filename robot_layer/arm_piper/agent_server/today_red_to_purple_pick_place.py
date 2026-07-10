@@ -20,6 +20,8 @@ import numpy as np
 import rospy
 import yaml
 from cv_bridge import CvBridge
+from geometry_msgs.msg import Pose
+from moveit_commander import MoveGroupCommander
 from sensor_msgs.msg import CameraInfo, Image
 from tf.transformations import quaternion_from_euler, quaternion_matrix
 
@@ -31,6 +33,7 @@ DEFAULT_CALIBRATION = os.path.join(SCRIPT_DIR, "camera_to_base.yaml")
 DEFAULT_COLOR_TOPIC = "/table_camera/color/image_raw"
 DEFAULT_DEPTH_TOPIC = "/table_camera/aligned_depth_to_color/image_raw"
 DEFAULT_INFO_TOPIC = "/table_camera/color/camera_info"
+PIPELINE_TEST_ORIENTATION = (0.0, 0.7071067811865476, 0.0, 0.7071067811865476)
 
 
 @dataclass
@@ -188,37 +191,98 @@ def save_debug_image(path: str, color_bgr: np.ndarray, detections: Dict[str, Det
     cv2.imwrite(path, img)
 
 
-def move_pick_place(args: argparse.Namespace, red: Detection, purple: Detection) -> None:
+def build_motion_targets(
+    pick: np.ndarray, place: np.ndarray, approach_height: float
+) -> Tuple[Tuple[str, np.ndarray], ...]:
+    pre_pick = pick.copy()
+    pre_pick[2] += approach_height
+    pre_place = place.copy()
+    pre_place[2] += approach_height
+    return (
+        ("pre-pick", pre_pick),
+        ("pick", pick),
+        ("lift", pre_pick),
+        ("pre-place", pre_place),
+        ("place", place),
+        ("retreat", pre_place),
+    )
+
+
+def print_motion_targets(pick: np.ndarray, place: np.ndarray, targets: Tuple[Tuple[str, np.ndarray], ...]) -> None:
+    print("FAKE MOTION TARGETS")
+    print(f"fake pick: {pick.tolist()}")
+    print(f"fake place: {place.tolist()}")
+    for label, target in targets:
+        print(f"{label}: {target.tolist()}")
+
+
+def motion_orientation(pipeline_test: bool) -> Tuple[float, float, float, float]:
+    if pipeline_test:
+        return PIPELINE_TEST_ORIENTATION
+    q = quaternion_from_euler(math.pi, 0.0, 0.0)
+    return float(q[0]), float(q[1]), float(q[2]), float(q[3])
+
+
+def preflight_motion_targets(
+    targets: Tuple[Tuple[str, np.ndarray], ...], orientation: Tuple[float, float, float, float]
+) -> None:
+    """Plan every target before any command is sent to the Piper driver."""
+    planner = MoveGroupCommander("arm")
+    for label, target in targets:
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = target.tolist()
+        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = orientation
+        planner.set_pose_target(pose)
+        plan = planner.plan()
+        planner.clear_pose_targets()
+        planned = plan[0] if isinstance(plan, tuple) else bool(plan.joint_trajectory.points)
+        if not planned:
+            raise RuntimeError(f"MoveIt preflight failed for {label}; no Piper command was sent")
+        print(f"Preflight {label}: PASS")
+
+
+def execute_motion_targets(
+    args: argparse.Namespace,
+    targets: Tuple[Tuple[str, np.ndarray], ...],
+    orientation: Tuple[float, float, float, float],
+) -> None:
+    robot = PiperRobotEnv(init_ros_node=False)
+
+    def move_or_raise(label: str, target: np.ndarray) -> None:
+        print(f"Executing {label}: {target.tolist()}")
+        result = robot.move_to_pose(
+            target.tolist() + list(orientation),
+            max_velocity=args.speed,
+            max_acceleration=args.accel,
+        )
+        if not result.get("success", False):
+            raise RuntimeError(f"MoveIt could not plan or execute {label}; no Piper command was sent")
+        print(f"Execution {label}: PASS")
+
+    for label, target in targets:
+        move_or_raise(label, target)
+
+
+def calibrated_motion_targets(args: argparse.Namespace, red: Detection, purple: Detection) -> Tuple[Tuple[str, np.ndarray], ...]:
     if red.base_xyz_m is None or purple.base_xyz_m is None:
         raise RuntimeError("Refusing to move without calibrated base coordinates")
-    robot = PiperRobotEnv(init_ros_node=False)
-    q = quaternion_from_euler(math.pi, 0.0, 0.0)
-    orientation = [float(q[0]), float(q[1]), float(q[2]), float(q[3])]
-
     pick = red.base_xyz_m.copy()
     place = purple.base_xyz_m.copy()
     pick[2] += args.pick_z_offset
     place[2] += args.place_z_offset
+    return build_motion_targets(pick, place, effective_approach_height(args))
 
-    pre_pick = pick.copy()
-    pre_pick[2] += args.approach_height
-    pre_place = place.copy()
-    pre_place[2] += args.approach_height
 
-    speed = args.speed
-    accel = args.accel
-    print("Moving to pre-pick", pre_pick.tolist())
-    robot.move_to_pose(pre_pick.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
-    print("Moving to pick", pick.tolist())
-    robot.move_to_pose(pick.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
-    print("Lifting")
-    robot.move_to_pose(pre_pick.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
-    print("Moving to pre-place", pre_place.tolist())
-    robot.move_to_pose(pre_place.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
-    print("Moving to place", place.tolist())
-    robot.move_to_pose(place.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
-    print("Retreating")
-    robot.move_to_pose(pre_place.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
+def pipeline_test_motion_targets(args: argparse.Namespace) -> Tuple[np.ndarray, np.ndarray, Tuple[Tuple[str, np.ndarray], ...]]:
+    pick = np.array([args.test_pick_x, args.test_pick_y, args.test_pick_z], dtype=np.float64)
+    place = np.array([args.test_place_x, args.test_place_y, args.test_place_z], dtype=np.float64)
+    return pick, place, build_motion_targets(pick, place, effective_approach_height(args))
+
+
+def effective_approach_height(args: argparse.Namespace) -> float:
+    if args.approach_height is not None:
+        return args.approach_height
+    return 0.05 if args.pipeline_test else 0.08
 
 
 def require_real_trajectory_execution() -> None:
@@ -233,6 +297,7 @@ def require_real_trajectory_execution() -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Detect red object and purple file; optionally execute pick/place.")
     p.add_argument("--execute", action="store_true", help="Actually move the robot. Omitted means detect-only.")
+    p.add_argument("--pipeline-test", action="store_true", help="Use fixed fake targets to test the motion pipeline.")
     p.add_argument("--calibration", default=DEFAULT_CALIBRATION)
     p.add_argument("--color-topic", default=DEFAULT_COLOR_TOPIC)
     p.add_argument("--depth-topic", default=DEFAULT_DEPTH_TOPIC)
@@ -241,11 +306,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-red-area", type=float, default=300.0)
     p.add_argument("--min-purple-area", type=float, default=600.0)
     p.add_argument("--debug-image", default=os.path.join(SCRIPT_DIR, "today_pick_place_debug.jpg"))
-    p.add_argument("--approach-height", type=float, default=0.08)
+    p.add_argument("--approach-height", type=float, default=None,
+                   help="Approach height in m (default: 0.08 normal, 0.05 pipeline test).")
     p.add_argument("--pick-z-offset", type=float, default=0.02)
     p.add_argument("--place-z-offset", type=float, default=0.04)
     p.add_argument("--speed", type=float, default=0.05)
     p.add_argument("--accel", type=float, default=0.05)
+    p.add_argument("--test-pick-x", type=float, default=0.30)
+    p.add_argument("--test-pick-y", type=float, default=0.00)
+    p.add_argument("--test-pick-z", type=float, default=0.25)
+    p.add_argument("--test-place-x", type=float, default=0.30)
+    p.add_argument("--test-place-y", type=float, default=0.10)
+    p.add_argument("--test-place-z", type=float, default=0.25)
     return p.parse_args()
 
 
@@ -254,7 +326,9 @@ def main() -> int:
     if not rospy.get_node_uri():
         rospy.init_node("today_red_to_purple_pick_place", anonymous=True, disable_signals=True)
 
-    if args.execute:
+    if args.pipeline_test:
+        T = None
+    elif args.execute:
         T = load_camera_to_base(args.calibration)
     elif os.path.exists(args.calibration):
         T = load_camera_to_base(args.calibration)
@@ -270,6 +344,8 @@ def main() -> int:
     detections = {"red": red, "purple": purple}
     save_debug_image(args.debug_image, reader.color, detections)
 
+    if args.pipeline_test:
+        print("REAL PERCEPTION OUTPUT")
     for det in detections.values():
         base = None if det.base_xyz_m is None else det.base_xyz_m.tolist()
         print(
@@ -279,12 +355,32 @@ def main() -> int:
         )
     print(f"Wrote debug image: {args.debug_image}")
 
+    if args.pipeline_test:
+        print("WARNING: PIPELINE TEST MODE")
+        print("Camera-derived base coordinates are ignored.")
+        print("The robot will move between fixed fake positions in open air.")
+        print("No object will actually be picked up.")
+        pick, place, targets = pipeline_test_motion_targets(args)
+        orientation = motion_orientation(True)
+        print_motion_targets(pick, place, targets)
+        preflight_motion_targets(targets, orientation)
+        if not args.execute:
+            print("Pipeline-test detect-only mode. Preflight passed; no robot motion was sent.")
+            return 0
+        require_real_trajectory_execution()
+        execute_motion_targets(args, targets, orientation)
+        print("Pipeline-test sequence complete")
+        return 0
+
     if not args.execute:
         print("Detect-only mode. Re-run with --execute after checking calibration and debug image.")
         return 0
 
     require_real_trajectory_execution()
-    move_pick_place(args, red, purple)
+    targets = calibrated_motion_targets(args, red, purple)
+    orientation = motion_orientation(False)
+    preflight_motion_targets(targets, orientation)
+    execute_motion_targets(args, targets, orientation)
     print("Pick/place sequence complete")
     return 0
 
