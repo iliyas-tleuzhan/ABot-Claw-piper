@@ -221,6 +221,15 @@ def move_pick_place(args: argparse.Namespace, red: Detection, purple: Detection)
     robot.move_to_pose(pre_place.tolist() + orientation, max_velocity=speed, max_acceleration=accel)
 
 
+def require_real_trajectory_execution() -> None:
+    controller_manager = rospy.get_param("/move_group/moveit_controller_manager", "")
+    if "fake" in controller_manager.lower():
+        raise RuntimeError(
+            "Refusing physical pick/place: MoveIt is using a fake controller manager "
+            f"({controller_manager}). Configure a real hardware trajectory controller first."
+        )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Detect red object and purple file; optionally execute pick/place.")
     p.add_argument("--execute", action="store_true", help="Actually move the robot. Omitted means detect-only.")
@@ -274,6 +283,7 @@ def main() -> int:
         print("Detect-only mode. Re-run with --execute after checking calibration and debug image.")
         return 0
 
+    require_real_trajectory_execution()
     move_pick_place(args, red, purple)
     print("Pick/place sequence complete")
     return 0
