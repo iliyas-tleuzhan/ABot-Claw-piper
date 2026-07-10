@@ -1,0 +1,26 @@
+camera_to_base:
+  - [-0.514495755, 0.597814144, -0.614745774, 0.350000000]
+  - [0.857492926, 0.358688486, -0.368847465, 0.210000000]
+  - [0.000000000, -0.716910608, -0.697165103, 0.460000000]
+  - [0.000000000, 0.000000000, 0.000000000, 1.000000000]
+calibration:
+  name: calibration_1
+  method: rough_manual_camera_pose
+  camera_position_base_m:
+    x: 0.35
+    y: 0.21
+    z: 0.46
+  aim_point_base_m:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  tilt_from_down_deg: 45.8
+  roll_deg: 0.0
+  assumptions:
+  - camera horizontal heading points toward the configured aim point
+  - zero camera roll unless --roll-deg is provided
+  - measurements are rough ruler and phone-angle measurements
+  warnings:
+  - use detect-only first
+  - validate coordinate directions before hover or motion
+  - do not use for precise grasping without further verification

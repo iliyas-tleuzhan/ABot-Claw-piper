@@ -10,15 +10,18 @@ CONTAINER="abot-piper-noetic"
 CONTAINER_REPO="/root/ABot-Claw"
 STACK_DIR="${CONTAINER_REPO}/robot_layer/arm_piper/agent_server"
 ROS_WS="${STACK_DIR}/robot_driver_ros"
+USE_FAKE_DEPTH=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<'EOF'
-Usage: ./start_abotclaw_all.sh [--restart|--status|--stop]
+Usage: ./start_abotclaw_all.sh [--restart] [--use-fake-depth]
+       ./start_abotclaw_all.sh [--status|--stop]
 
   (no option)  Start the infrastructure if needed, then attach to tmux.
   --restart     Kill the existing abotclaw tmux session and start it fresh.
+  --use-fake-depth  Use the raw ROS RealSense publisher plus fake aligned-depth bridge.
   --status      Show Docker, tmux, and ROS quick status without starting anything.
   --stop        Stop only the abotclaw tmux session; Docker continues running.
 EOF
@@ -125,11 +128,15 @@ roslaunch piper start_single_piper.launch
 EOF
 )
 
-realsense_cmd=$(cat <<EOF
+raw_realsense_cmd=$(cat <<EOF
 ${ROS_ENV}
 cd ${ROS_WS}
 
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH
+
+pkill -f '[r]ealsense_d555_py_publisher.py' || true
+pkill -f '[r]ealsense2_camera' || true
+pkill -f '[f]ake_aligned_depth_from_raw.py' || true
 
 until rostopic list >/dev/null 2>&1; do sleep 1; done
 roslaunch realsense2_camera rs_camera.launch \\
@@ -147,6 +154,19 @@ roslaunch realsense2_camera rs_camera.launch \\
   depth_height:=360 \\
   color_fps:=30 \\
   depth_fps:=30
+EOF
+)
+
+real_aligned_realsense_cmd=$(cat <<EOF
+${ROS_ENV}
+cd ${STACK_DIR}
+
+pkill -f '[r]ealsense_d555_py_publisher.py' || true
+pkill -f '[r]ealsense2_camera' || true
+pkill -f '[f]ake_aligned_depth_from_raw.py' || true
+
+until rostopic list >/dev/null 2>&1; do sleep 1; done
+./start_realsense_d555_py.sh
 EOF
 )
 
@@ -181,8 +201,25 @@ set +e
 rostopic list | head
 rostopic echo -n 1 /joint_states_single
 rostopic echo -n 1 /end_pose
+
+check_topic_publishers() {
+  local topic="\$1"
+  local max_publishers="\$2"
+  local info publishers
+  info="\$(rostopic info "\$topic" 2>&1)"
+  echo "\$info"
+  publishers="\$(printf '%s\n' "\$info" | awk '/^Publishers:/{in_publishers=1; next} /^Subscribers:/{in_publishers=0} in_publishers && /\*/{count++} END{print count+0}')"
+  if [[ "\$publishers" -eq 0 ]]; then
+    echo "WARNING: \$topic has zero publishers."
+  elif [[ "\$max_publishers" -gt 0 && "\$publishers" -gt "\$max_publishers" ]]; then
+    echo "WARNING: \$topic has \$publishers publishers; expected at most \$max_publishers."
+  fi
+}
+
+check_topic_publishers /table_camera/color/image_raw 0
+check_topic_publishers /table_camera/aligned_depth_to_color/image_raw 1
+check_topic_publishers /table_camera/color/camera_info 0
 timeout 8 rostopic hz /table_camera/color/image_raw
-timeout 8 rostopic hz /table_camera/depth/image_rect_raw
 timeout 8 rostopic hz /table_camera/aligned_depth_to_color/image_raw
 timeout 8 rostopic echo -n 1 /table_camera/color/camera_info
 rosservice list | grep joint_moveit_ctrl || true
@@ -200,41 +237,57 @@ EOF
 )
 
 main() {
-    local option="${1:-}"
-    if [[ $# -gt 1 ]]; then
-        usage >&2
+    local action="start"
+    local restart=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --restart)
+                restart=true
+                ;;
+            --use-fake-depth)
+                USE_FAKE_DEPTH=true
+                ;;
+            --stop)
+                action="stop"
+                ;;
+            --status)
+                action="status"
+                ;;
+            *)
+                echo "ERROR: Unknown option: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+        shift
+    done
+
+    if [[ "${action}" != "start" && ( "${restart}" == true || "${USE_FAKE_DEPTH}" == true ) ]]; then
+        echo "ERROR: --restart and --use-fake-depth can only be used when starting." >&2
         exit 2
     fi
 
-    case "${option}" in
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        --stop)
-            require_command tmux
-            if tmux has-session -t "${SESSION}" 2>/dev/null; then
-                tmux kill-session -t "${SESSION}"
-                echo "Stopped tmux session ${SESSION}. Docker container remains running."
-            else
-                echo "tmux session ${SESSION} is not running."
-            fi
-            exit 0
-            ;;
-        --status)
-            require_command docker
-            require_command tmux
-            show_status
-            exit 0
-            ;;
-        ''|--restart)
-            ;;
-        *)
-            echo "ERROR: Unknown option: ${option}" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
+    if [[ "${action}" == "stop" ]]; then
+        require_command tmux
+        if tmux has-session -t "${SESSION}" 2>/dev/null; then
+            tmux kill-session -t "${SESSION}"
+            echo "Stopped tmux session ${SESSION}. Docker container remains running."
+        else
+            echo "tmux session ${SESSION} is not running."
+        fi
+        exit 0
+    fi
+
+    if [[ "${action}" == "status" ]]; then
+        require_command docker
+        require_command tmux
+        show_status
+        exit 0
+    fi
 
     require_command docker
     require_command tmux
@@ -243,7 +296,7 @@ main() {
     ensure_container_running
 
     if tmux has-session -t "${SESSION}" 2>/dev/null; then
-        if [[ "${option}" == "--restart" ]]; then
+        if [[ "${restart}" == true ]]; then
             echo "Restarting tmux session ${SESSION}..."
             tmux kill-session -t "${SESSION}"
         else
@@ -254,11 +307,20 @@ main() {
 
     echo "WARNING: This starts infrastructure only. It does not move the robot."
     echo "WARNING: MoveIt 'Fake execution of trajectory' means planning only, not real hardware control."
+    if [[ "${USE_FAKE_DEPTH}" == true ]]; then
+        echo "WARNING: Using fake aligned depth fallback, not RealSense hardware alignment."
+    else
+        echo "Using the RealSense Python publisher with hardware depth-to-color alignment."
+    fi
 
     tmux new-session -d -s "${SESSION}" -n "roscore" "$(docker_shell "${roscore_cmd}")"
     tmux new-window -t "${SESSION}" -n "piper_driver" "$(docker_shell "${piper_driver_cmd}")"
-    tmux new-window -t "${SESSION}" -n "realsense" "$(docker_shell "${realsense_cmd}")"
-    tmux new-window -t "${SESSION}" -n "fake_aligned_depth" "$(docker_shell "${fake_aligned_depth_cmd}")"
+    if [[ "${USE_FAKE_DEPTH}" == true ]]; then
+        tmux new-window -t "${SESSION}" -n "realsense_raw" "$(docker_shell "${raw_realsense_cmd}")"
+        tmux new-window -t "${SESSION}" -n "fake_aligned_depth" "$(docker_shell "${fake_aligned_depth_cmd}")"
+    else
+        tmux new-window -t "${SESSION}" -n "realsense" "$(docker_shell "${real_aligned_realsense_cmd}")"
+    fi
     tmux new-window -t "${SESSION}" -n "moveit_services" "$(docker_shell "${moveit_cmd}")"
     tmux new-window -t "${SESSION}" -n "health_checks" "$(docker_shell "${health_checks_cmd}")"
     tmux select-window -t "${SESSION}:roscore"
