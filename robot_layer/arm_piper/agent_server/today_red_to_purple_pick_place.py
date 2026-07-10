@@ -117,6 +117,8 @@ def make_mask(hsv: np.ndarray, name: str) -> np.ndarray:
         mask = cv2.bitwise_or(m1, m2)
     elif name == "purple":
         mask = cv2.inRange(hsv, np.array([125, 45, 35]), np.array([165, 255, 255]))
+    elif name == "blue":
+        mask = cv2.inRange(hsv, np.array([90, 70, 40]), np.array([130, 255, 255]))
     else:
         raise ValueError(name)
     kernel = np.ones((5, 5), np.uint8)

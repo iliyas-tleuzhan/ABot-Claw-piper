@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create camera_to_base.yaml from colored target samples.
 
-For each sample, place a red target at a known base-frame coordinate and pass
+For each sample, place a colored target at a known base-frame coordinate and pass
 that coordinate with --sample. The script observes the target through the D555,
 records its camera-frame 3D point, fits a rigid camera->base transform, and
 writes camera_to_base.yaml.
@@ -14,6 +14,7 @@ import os
 import time
 from typing import List, Tuple
 
+import cv2
 import numpy as np
 import rospy
 import yaml
@@ -81,9 +82,31 @@ def format_matrix(T: np.ndarray) -> List[List[float]]:
     return [[float(f"{value:.9f}") for value in row] for row in T.tolist()]
 
 
+def save_sample_debug_image(
+    path: str, color_bgr: np.ndarray, pixel: Tuple[int, int], sample_name: str, target_color: str
+) -> None:
+    image = color_bgr.copy()
+    colors = {"red": (0, 0, 255), "blue": (255, 0, 0), "purple": (255, 0, 255)}
+    color = colors[target_color]
+    cv2.drawMarker(image, pixel, color, cv2.MARKER_CROSS, 20, 2)
+    cv2.circle(image, pixel, 8, color, 2)
+    cv2.putText(
+        image,
+        f"{sample_name} ({target_color})",
+        (pixel[0] + 12, max(24, pixel[1] - 12)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+    if not cv2.imwrite(path, image):
+        raise RuntimeError(f"Failed to write debug image: {path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fit camera_to_base.yaml from red target detections and known base coordinates."
+        description="Fit camera_to_base.yaml from colored target detections and known base coordinates."
     )
     parser.add_argument(
         "--sample",
@@ -97,7 +120,9 @@ def main() -> int:
     parser.add_argument("--depth-topic", default=DEFAULT_DEPTH_TOPIC)
     parser.add_argument("--camera-info-topic", default=DEFAULT_INFO_TOPIC)
     parser.add_argument("--timeout", type=float, default=15.0)
-    parser.add_argument("--min-red-area", type=float, default=300.0)
+    parser.add_argument("--target-color", choices=("red", "blue", "purple"), default="red")
+    parser.add_argument("--min-target-area", dest="min_target_area", type=float, default=300.0)
+    parser.add_argument("--min-red-area", dest="min_target_area", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if len(args.sample) < 3:
@@ -109,22 +134,25 @@ def main() -> int:
     camera_points = []
     base_points = []
     observed = []
+    debug_dir = os.path.dirname(os.path.abspath(args.output))
     for index, (name, base_xyz) in enumerate(args.sample, start=1):
         input(
-            f"Place red target at {name} base={base_xyz.tolist()} "
+            f"Place {args.target_color} target at {name} base={base_xyz.tolist()} "
             f"({index}/{len(args.sample)}), then press Enter..."
         )
         reader = RgbdReader(args.color_topic, args.depth_topic, args.camera_info_topic, args.timeout)
         reader.start()
         assert reader.color is not None and reader.depth is not None and reader.K is not None
         det = detect_color_object(
-            "red",
+            args.target_color,
             reader.color,
             reader.depth,
             reader.K,
             None,
-            args.min_red_area,
+            args.min_target_area,
         )
+        debug_path = os.path.join(debug_dir, f"calibration_debug_{name}.jpg")
+        save_sample_debug_image(debug_path, reader.color, det.pixel, name, args.target_color)
         camera_points.append(det.camera_xyz_m)
         base_points.append(base_xyz)
         observed.append(
@@ -135,9 +163,13 @@ def main() -> int:
                 "depth_m": float(det.depth_m),
                 "camera_xyz_m": [float(v) for v in det.camera_xyz_m.tolist()],
                 "base_xyz_m": [float(v) for v in base_xyz.tolist()],
+                "debug_image": debug_path,
             }
         )
-        print(f"  camera={det.camera_xyz_m.tolist()} pixel={det.pixel} area={det.area_px:.1f}")
+        print(
+            f"  camera={det.camera_xyz_m.tolist()} pixel={det.pixel} "
+            f"area={det.area_px:.1f} debug={debug_path}"
+        )
 
     camera_arr = np.vstack(camera_points)
     base_arr = np.vstack(base_points)
@@ -148,7 +180,8 @@ def main() -> int:
     payload = {
         "camera_to_base": format_matrix(T),
         "calibration": {
-            "method": "red_target_point_correspondences",
+            "method": "target_color_point_correspondences",
+            "target_color": args.target_color,
             "samples": observed,
             "residuals_m": [float(v) for v in errors.tolist()],
             "rms_error_m": float(np.sqrt(np.mean(errors ** 2))),
@@ -158,9 +191,16 @@ def main() -> int:
     with open(args.output, "w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, sort_keys=False)
 
-    print(f"Wrote {args.output}")
+    print("Calibration summary")
+    print(f"Output path: {os.path.abspath(args.output)}")
     print(f"RMS error: {payload['calibration']['rms_error_m']:.4f} m")
     print(f"Max error: {payload['calibration']['max_error_m']:.4f} m")
+    for sample, error in zip(observed, errors):
+        print(
+            f"  {sample['name']}: pixel={sample['pixel']} depth={sample['depth_m']:.4f} m "
+            f"camera_xyz={sample['camera_xyz_m']} base_xyz={sample['base_xyz_m']} "
+            f"residual={error:.6f} m"
+        )
     return 0
 
 
