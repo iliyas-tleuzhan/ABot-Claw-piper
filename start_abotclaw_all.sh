@@ -108,6 +108,10 @@ EOF
 
 roscore_cmd=$(cat <<EOF
 ${ROS_ENV}
+if rostopic list >/dev/null 2>&1; then
+  echo "ROS master already reachable at \$ROS_MASTER_URI; reusing it."
+  exec bash
+fi
 roscore
 EOF
 )
@@ -115,6 +119,11 @@ EOF
 piper_driver_cmd=$(cat <<EOF
 ${ROS_ENV}
 cd ${ROS_WS}
+
+if rosnode list 2>/dev/null | grep -qx /piper_ctrl_single_node; then
+  echo "Piper driver node already exists; reusing it."
+  exec bash
+fi
 
 ip link set can0 down 2>/dev/null || true
 ip link set can0 type can bitrate 1000000
@@ -188,6 +197,10 @@ moveit_cmd=$(cat <<EOF
 ${ROS_ENV}
 cd ${ROS_WS}
 echo "WARNING: 'Fake execution of trajectory' means MoveIt is planning only, not commanding real hardware."
+if rosnode list 2>/dev/null | grep -qx /move_group; then
+  echo "MoveIt node already exists; reusing it."
+  exec bash
+fi
 until rostopic list >/dev/null 2>&1; do sleep 1; done
 roslaunch piper_with_gripper_moveit demo.launch rviz:=false
 EOF

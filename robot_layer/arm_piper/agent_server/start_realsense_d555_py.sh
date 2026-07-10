@@ -14,7 +14,9 @@ CAMERA_NAME="${REALSENSE_CAMERA_NAME:-table_camera}"
 SERIAL="${REALSENSE_SERIAL:-352222303634}"
 WIDTH="${REALSENSE_COLOR_WIDTH:-640}"
 HEIGHT="${REALSENSE_COLOR_HEIGHT:-360}"
-FPS="${REALSENSE_FPS:-30}"
+# The D555e currently enumerates through USB 2.1, where 640x360 color/depth
+# supports up to 15 FPS. Set REALSENSE_FPS=30 only when USB 3 is available.
+FPS="${REALSENSE_FPS:-15}"
 
 echo "Starting pyrealsense2 D555 publisher as /${CAMERA_NAME}"
 exec python3 "${SCRIPT_DIR}/realsense_d555_py_publisher.py" \
