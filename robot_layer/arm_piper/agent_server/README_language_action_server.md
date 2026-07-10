@@ -57,6 +57,8 @@ cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
 ./start_realsense_d555_py.sh
 ```
 
+This Python publisher uses RealSense depth-to-color alignment. `start_abotclaw_all.sh` uses it by default; `--use-fake-depth` is only a fallback for the raw ROS RealSense publisher plus bridge.
+
 Check RGB, aligned depth, and camera info:
 
 ```bash
@@ -83,7 +85,51 @@ Replace the example identity matrix with a measured `camera_to_base` transform. 
 
 Do not use `camera_to_base.example.yaml` for movement.
 
-## Blue Tape Point Calibration
+## Rough Manual Camera Calibration
+
+The current calibration workflow uses a rough external-camera pose for detect-only and hover validation. It is not suitable for precise grasping. Generate the initial transform from the measured camera position and tilt:
+
+```bash
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
+
+source /opt/ros/noetic/setup.bash
+source robot_driver_ros/devel/setup.bash
+
+python3 generate_manual_camera_calibration.py \
+  --xc 0.35 \
+  --yc 0.21 \
+  --zc 0.46 \
+  --tilt-deg 45.8 \
+  --output calibration_1.yaml \
+  --print-matrix
+```
+
+Validate only the transformed target coordinates before any hover or movement:
+
+```bash
+python3 validate_manual_calibration.py \
+  --calibration calibration_1.yaml \
+  --watch
+```
+
+Then use detect-only pick/place output:
+
+```bash
+python3 today_red_to_purple_pick_place.py \
+  --calibration calibration_1.yaml
+```
+
+Before any movement, verify all of the following:
+
+1. Moving the red cup farther from the base changes base X in the expected direction.
+2. Moving it left/right changes base Y in the expected direction.
+3. Table targets produce plausible and similar base Z values.
+4. The result is only a rough transform from ruler and phone-angle measurements.
+5. ArUco eye-to-hand calibration remains the intended accurate solution.
+
+`calibrate_camera_to_base_points.py` is retained for point-pair calibration, but it is not the current chosen workflow.
+
+## Blue Tape Point Calibration (Retained)
 
 Use the manual point-pair calibration script to create `camera_to_base.yaml` from blue tape markers:
 
