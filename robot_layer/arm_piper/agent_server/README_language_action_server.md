@@ -85,6 +85,34 @@ Replace the example identity matrix with a measured `camera_to_base` transform. 
 
 Do not use `camera_to_base.example.yaml` for movement.
 
+## Fake Target Pipeline Test
+
+Use the explicit pipeline test mode when camera calibration is not ready. Camera
+detection remains real, but calibration is bypassed and the robot receives fixed
+open-air targets. It exercises detection, task construction, planning, and real
+trajectory execution only; no object is picked up because gripper actions are
+disabled.
+
+Detect and display the fake path without motion:
+
+```bash
+python3 today_red_to_purple_pick_place.py \
+  --pipeline-test
+```
+
+Run the slow physical pipeline test:
+
+```bash
+python3 today_red_to_purple_pick_place.py \
+  --pipeline-test \
+  --execute \
+  --speed 0.02 \
+  --accel 0.02
+```
+
+The default fake path stays above Z=0.25 m and moves only 10 cm sideways. All
+six stages must pass planning before the first trajectory command is sent.
+
 ## Rough Manual Camera Calibration
 
 The current calibration workflow uses a rough external-camera pose for detect-only and hover validation. It is not suitable for precise grasping. Generate the initial transform from the measured camera position and tilt:
