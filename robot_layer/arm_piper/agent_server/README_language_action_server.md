@@ -83,6 +83,27 @@ Replace the example identity matrix with a measured `camera_to_base` transform. 
 
 Do not use `camera_to_base.example.yaml` for movement.
 
+## Blue Tape Point Calibration
+
+Use the manual point-pair calibration script to create `camera_to_base.yaml` from blue tape markers:
+
+```bash
+cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
+
+source /opt/ros/noetic/setup.bash
+source robot_driver_ros/devel/setup.bash
+
+python3 calibrate_camera_to_base_points.py \
+  --target-color blue \
+  --sample p1,0.370,-0.070,0.000 \
+  --sample p2,0.370,0.150,0.000 \
+  --sample p3,0.210,0.150,0.000 \
+  --sample p4,0.205,-0.055,0.000 \
+  --sample p5,0.300,0.020,0.000 \
+  --output camera_to_base.yaml \
+  --min-target-area 100
+```
+
 ## Required Terminals
 
 1. Piper ROS driver:
