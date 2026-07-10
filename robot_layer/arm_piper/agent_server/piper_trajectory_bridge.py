@@ -14,7 +14,7 @@ ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 
 class PiperTrajectoryBridge:
     def __init__(self) -> None:
-        self.command_topic = rospy.get_param("~command_topic", "/joint_states")
+        self.command_topic = rospy.get_param("~command_topic", "/piper_joint_commands")
         self.command_publisher = rospy.Publisher(self.command_topic, JointState, queue_size=1)
         self.server = actionlib.SimpleActionServer(
             "arm_controllers/follow_joint_trajectory",
