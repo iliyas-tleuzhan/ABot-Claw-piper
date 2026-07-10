@@ -1,0 +1,13 @@
+<launch>
+  <!-- Load the vendor MoveIt configuration, then override its conservative
+       simulation-oriented execution watchdog for real Piper feedback. -->
+  <include file="$(find piper_with_gripper_moveit)/launch/move_group.launch">
+    <arg name="load_robot_description" value="true" />
+    <arg name="moveit_controller_manager" value="simple" />
+  </include>
+
+  <!-- These are execution synchronization tolerances, not joint limits. -->
+  <param name="/move_group/trajectory_execution/allowed_execution_duration_scaling" value="3.0" />
+  <param name="/move_group/trajectory_execution/allowed_goal_duration_margin" value="5.0" />
+  <param name="/move_group/trajectory_execution/allowed_start_tolerance" value="0.03" />
+</launch>
