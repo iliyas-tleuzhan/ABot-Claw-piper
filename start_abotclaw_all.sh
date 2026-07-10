@@ -133,7 +133,23 @@ ip link set can0 up
 ip link show can0
 
 until rostopic list >/dev/null 2>&1; do sleep 1; done
-roslaunch piper start_single_piper.launch
+rosrun piper piper_ctrl_single_node.py \
+  _can_port:=can0 \
+  _auto_enable:=true \
+  _gripper_val_mutiple:=1 \
+  _gripper_exist:=true \
+  joint_ctrl_single:=/piper_joint_commands
+EOF
+)
+
+joint_state_relay_cmd=$(cat <<EOF
+${ROS_ENV}
+if rosnode list 2>/dev/null | grep -q '^/piper_joint_state_relay'; then
+  echo "Piper joint-state relay already exists; reusing it."
+  exec bash
+fi
+until timeout 3 rostopic echo -n 1 /joint_states_single >/dev/null 2>&1; do sleep 1; done
+exec python3 ${STACK_DIR}/piper_joint_state_relay.py
 EOF
 )
 
@@ -361,6 +377,7 @@ main() {
 
     tmux new-session -d -s "${SESSION}" -n "roscore" "$(docker_shell "${roscore_cmd}")"
     tmux new-window -t "${SESSION}" -n "piper_driver" "$(docker_shell "${piper_driver_cmd}")"
+    tmux new-window -t "${SESSION}" -n "joint_state_relay" "$(docker_shell "${joint_state_relay_cmd}")"
     if [[ "${USE_FAKE_DEPTH}" == true ]]; then
         tmux new-window -t "${SESSION}" -n "realsense_raw" "$(docker_shell "${raw_realsense_cmd}")"
         tmux new-window -t "${SESSION}" -n "fake_aligned_depth" "$(docker_shell "${fake_aligned_depth_cmd}")"
