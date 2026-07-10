@@ -201,6 +201,15 @@ cd robot_layer/arm_piper/agent_server
 python3 server.py --port 8888
 ```
 
+### Host-side Piper Startup
+
+The host-side launcher starts the Piper ROS1, RealSense, aligned-depth relay, MoveIt, and health-check infrastructure in tmux. It does not move the robot; run calibration and motion scripts manually after reviewing the health checks.
+
+```bash
+./start_abotclaw_all.sh --restart
+tmux attach -t abotclaw
+```
+
 ---
 
 ## 🙏 Acknowledgement
@@ -212,4 +221,3 @@ This project builds upon the following open-source projects. We thank these team
 We also gratefully acknowledge Deepblue College for their support in the humanoid robot deployment, providing access to the Unitree G1-Romp Edu robot and the LinkerBot-O6 hand system.
 
 ---
-
