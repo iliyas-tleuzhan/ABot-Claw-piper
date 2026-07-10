@@ -196,13 +196,46 @@ EOF
 moveit_cmd=$(cat <<EOF
 ${ROS_ENV}
 cd ${ROS_WS}
-echo "WARNING: 'Fake execution of trajectory' means MoveIt is planning only, not commanding real hardware."
 if rosnode list 2>/dev/null | grep -qx /move_group; then
-  echo "MoveIt node already exists; reusing it."
+  controller_manager="\$(rosparam get /move_group/moveit_controller_manager 2>/dev/null || true)"
+  if [[ "\$controller_manager" == *moveit_simple_controller_manager* ]]; then
+    echo "MoveIt real trajectory manager already exists; reusing it."
+  else
+    echo "ERROR: Existing MoveIt uses \$controller_manager, not the real trajectory manager."
+    echo "Restart the stack after stopping the fake MoveIt process."
+  fi
   exec bash
 fi
 until rostopic list >/dev/null 2>&1; do sleep 1; done
-roslaunch piper_with_gripper_moveit demo.launch rviz:=false
+roslaunch piper_with_gripper_moveit demo.launch use_rviz:=false moveit_controller_manager:=simple &
+moveit_launch_pid=\$!
+wait "\$moveit_launch_pid"
+EOF
+)
+
+moveit_wrapper_cmd=$(cat <<EOF
+${ROS_ENV}
+until rosservice list 2>/dev/null | grep -qx /get_planning_scene; do sleep 1; done
+while true; do
+  if rosnode list 2>/dev/null | grep -qx /joint_moveit_ctrl_server; then
+    sleep 1
+    continue
+  fi
+  rosrun moveit_ctrl joint_moveit_ctrl_server.py || true
+  sleep 2
+done
+EOF
+)
+
+trajectory_bridge_cmd=$(cat <<EOF
+${ROS_ENV}
+cd ${STACK_DIR}
+if rosnode list 2>/dev/null | grep -q '^/piper_trajectory_bridge'; then
+  echo "Piper trajectory bridge already exists; reusing it."
+  exec bash
+fi
+until timeout 3 rostopic echo -n 1 /joint_states_single >/dev/null 2>&1; do sleep 1; done
+exec python3 ./piper_trajectory_bridge.py
 EOF
 )
 
@@ -319,7 +352,7 @@ main() {
     fi
 
     echo "WARNING: This starts infrastructure only. It does not move the robot."
-    echo "WARNING: MoveIt 'Fake execution of trajectory' means planning only, not real hardware control."
+    echo "MoveIt will use the Piper FollowJointTrajectory bridge for hardware trajectory commands."
     if [[ "${USE_FAKE_DEPTH}" == true ]]; then
         echo "WARNING: Using fake aligned depth fallback, not RealSense hardware alignment."
     else
@@ -334,7 +367,9 @@ main() {
     else
         tmux new-window -t "${SESSION}" -n "realsense" "$(docker_shell "${real_aligned_realsense_cmd}")"
     fi
+    tmux new-window -t "${SESSION}" -n "trajectory_bridge" "$(docker_shell "${trajectory_bridge_cmd}")"
     tmux new-window -t "${SESSION}" -n "moveit_services" "$(docker_shell "${moveit_cmd}")"
+    tmux new-window -t "${SESSION}" -n "moveit_wrapper" "$(docker_shell "${moveit_wrapper_cmd}")"
     tmux new-window -t "${SESSION}" -n "health_checks" "$(docker_shell "${health_checks_cmd}")"
     tmux select-window -t "${SESSION}:roscore"
 
