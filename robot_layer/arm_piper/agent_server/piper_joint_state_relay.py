@@ -18,10 +18,21 @@ class PiperJointStateRelay:
     def on_feedback(self, message: JointState) -> None:
         state = JointState()
         state.header = message.header
-        state.name = message.name
-        state.position = message.position
-        state.velocity = message.velocity
-        state.effort = message.effort
+        for index, name in enumerate(message.name):
+            position = message.position[index]
+            velocity = message.velocity[index] if index < len(message.velocity) else 0.0
+            effort = message.effort[index] if index < len(message.effort) else 0.0
+            if name == "gripper":
+                opening = abs(position)
+                state.name.extend(("joint7", "joint8"))
+                state.position.extend((opening, -opening))
+                state.velocity.extend((velocity, -velocity))
+                state.effort.extend((effort, effort))
+            else:
+                state.name.append(name)
+                state.position.append(position)
+                state.velocity.append(velocity)
+                state.effort.append(effort)
         self.publisher.publish(state)
 
 

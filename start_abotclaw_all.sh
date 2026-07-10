@@ -223,9 +223,13 @@ if rosnode list 2>/dev/null | grep -qx /move_group; then
   exec bash
 fi
 until rostopic list >/dev/null 2>&1; do sleep 1; done
-roslaunch piper_with_gripper_moveit demo.launch use_rviz:=false moveit_controller_manager:=simple &
-moveit_launch_pid=\$!
-wait "\$moveit_launch_pid"
+while true; do
+  roslaunch piper_with_gripper_moveit move_group.launch \
+    load_robot_description:=true \
+    moveit_controller_manager:=simple
+  echo "MoveIt move_group exited; restarting in 2 seconds."
+  sleep 2
+done
 EOF
 )
 
