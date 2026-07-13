@@ -1,43 +1,43 @@
 # ----------------------------------------------------------
-# ROS 话题 & 坐标系
+# ROS topics and coordinate frames
 # ----------------------------------------------------------
 ros:
-  # 彩色图像话题 (sensor_msgs/Image)
-  image_topic: "/wrist_camera/color/image_raw"
+  # Color image topic (sensor_msgs/Image).
+  image_topic: "/table_camera/color/image_raw"
 
-  # 对齐到彩色的深度图话题 (sensor_msgs/Image)
-  depth_topic: "/wrist_camera/aligned_depth_to_color/image_raw"
+  # Depth image topic aligned to the color image (sensor_msgs/Image).
+  depth_topic: "/table_camera/aligned_depth_to_color/image_raw"
 
-  # 相机内参话题 (sensor_msgs/CameraInfo)
-  camera_info_topic: "/wrist_camera/color/camera_info"
+  # Camera intrinsics topic (sensor_msgs/CameraInfo).
+  camera_info_topic: "/table_camera/color/camera_info"
 
-  # 相机光学坐标系 frame_id
-  camera_frame_id: "wrist_camera_color_optical_frame"
+  # Camera optical frame_id. ROS TF must provide base_link <- table_camera_color_optical_frame.
+  camera_frame_id: "table_camera_color_optical_frame"
 
-  # 机器人基座坐标系 frame_id
+  # Robot base frame_id.
   base_frame_id: "base_link"
 
-  # 关节状态话题 (sensor_msgs/JointState)
+  # Piper joint state topic (sensor_msgs/JointState).
   joint_state_topic: "/joint_states_single"
 
-  # 末端位姿话题 (geometry_msgs/PoseStamped)
+  # Piper end-effector pose topic (geometry_msgs/PoseStamped).
   end_pose_topic: "/end_pose"
 
 # ----------------------------------------------------------
-# 相机配置
+# Camera configuration
 # ----------------------------------------------------------
 cameras:
-  # 每个相机的 name → ROS 话题映射
-  # name 用于 SDK 内部索引（cam_high / cam_low / cam_left_wrist / cam_right_wrist）
-  # alias 用于 HTTP API 返回的设备名；未指定时默认与 name 相同
+  # Camera name to ROS topic mapping.
+  # The SDK uses standard internal names: cam_high, cam_low, cam_left_wrist, cam_right_wrist.
+  # alias is the readable camera name returned by the HTTP API; if omitted, it defaults to the camera name.
   cam_high:
     topic: "/left_camera/color/image_raw"
     alias: "left_camera_0_left"
     enabled: false
 
   cam_low:
-    topic: "/wrist_camera/color/image_raw"
-    alias: "wrist_camera_0_left"
+    topic: "/table_camera/color/image_raw"
+    alias: "table_camera"
     enabled: true
 
   cam_left_wrist:
@@ -49,73 +49,73 @@ cameras:
     enabled: false
 
 # ----------------------------------------------------------
-# YOLO 目标检测服务
+# YOLO object detection service
 # ----------------------------------------------------------
 yolo:
-  # 远程 YOLO HTTP 检测服务地址
-  url: "http://30.79.84.82:8017/detect"
+  # Remote YOLO HTTP detection endpoint.
+  url: "http://192.168.1.104:8013/detect"
 
-  # 置信度阈值
+  # Confidence threshold.
   conf_thres: 0.5
 
-  # NMS IoU 阈值
+  # NMS IoU threshold.
   iou_thres: 0.45
 
-  # HTTP 请求超时 (秒)
+  # HTTP request timeout in seconds.
   request_timeout: 10.0
 
-  # 等待首帧图像超时 (秒)
+  # Timeout in seconds while waiting for the first image frame.
   start_timeout: 30.0
 
 # ----------------------------------------------------------
-# AnyGrasp 抓取检测 (HTTP API 版)
+# GraspAnything grasp detection service (HTTP API)
 # ----------------------------------------------------------
 grasp:
-  # 远程 Grasp HTTP 服务地址
-  url: "http://30.79.84.82:8018/detect"
+  # Remote GraspAnything HTTP detection endpoint.
+  url: "http://192.168.1.104:8015/grasp/detect"
 
-  # 置信度阈值
+  # Confidence threshold.
   conf_thres: 0.5
 
-  # NMS IoU 阈值
+  # NMS IoU threshold.
   iou_thres: 0.45
 
-  # HTTP 请求超时 (秒)
+  # HTTP request timeout in seconds.
   request_timeout: 10.0
 
-  # 等待首帧图像超时 (秒)
+  # Timeout in seconds while waiting for the first image frame.
   start_timeout: 30.0
 
 # ----------------------------------------------------------
-# Piper 机械臂
+# Piper robot arm
 # ----------------------------------------------------------
 piper:
-  # ROS 环境 setup.bash 路径
-  setup_bash: "/path_to_robot_client/arm_piper/agent_server/robot_driver_ros/devel/setup.bash"
+  # ROS environment setup.bash path.
+  setup_bash: "/root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros/devel/setup.bash"
 
-  # MoveIt 默认速度 / 加速度比例 (0~1)
+  # MoveIt default velocity and acceleration scaling factors (0 to 1).
   max_velocity: 0.5
   max_acceleration: 0.5
 
-  # 复位关节角度 (弧度, 6 关节)
+  # Reset joint angles in radians for the 6 arm joints.
   reset_joints: [0.0, 0.08, -0.32, -0.02, 1.06, -0.034]
 
-  # 复位夹爪开合度 (米)
+  # Reset gripper opening in meters.
   reset_gripper: 0.059
 
-  # 关节数量
+  # Number of arm joints.
   num_joints: 6
 
-  # 夹爪行程范围 (米)
+  # Gripper travel range in meters.
   gripper_min: 0.0
   gripper_max: 0.06
 
 # ----------------------------------------------------------
-# Spatial Memory Hub (空间记忆服务)
+# Spatial Memory Hub service
 # ----------------------------------------------------------
 spatial_memory:
-  # 服务地址
-  url: "http://127.0.0.1:8022"
+  # Service endpoint.
+  url: "http://192.168.1.104:8012"
 
-  # HTTP 请求超时 (秒)
+  # HTTP request timeout in seconds.
   request_timeout: 10.0
