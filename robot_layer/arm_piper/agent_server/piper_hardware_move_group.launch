@@ -6,6 +6,11 @@
     <arg name="moveit_controller_manager" value="simple" />
   </include>
 
+  <!-- Override the vendor simple controller list for the real Piper hardware
+       path. roslaunch uploads parameters before starting move_group, so this is
+       available when MoveIt initializes its simple controller manager. -->
+  <rosparam ns="/move_group" file="$(dirname)/piper_hardware_simple_moveit_controllers.yaml" />
+
   <!-- These are execution synchronization tolerances, not joint limits. -->
   <param name="/move_group/trajectory_execution/allowed_execution_duration_scaling" value="3.0" />
   <param name="/move_group/trajectory_execution/allowed_goal_duration_margin" value="5.0" />

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Bridge MoveIt FollowJointTrajectory goals to the live Piper joint command topic."""
+"""Bridge MoveIt FollowJointTrajectory goals to the live Piper hardware interfaces."""
 
 from __future__ import annotations
 
 import actionlib
 import rospy
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryFeedback, FollowJointTrajectoryResult
+from piper_msgs.srv import Gripper
 from sensor_msgs.msg import JointState
 
 
 ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
+GRIPPER_JOINT = "joint7"
+GRIPPER_FEEDBACK_NAMES = ("joint7", "gripper")
 
 
 class PiperTrajectoryBridge:
@@ -18,31 +21,48 @@ class PiperTrajectoryBridge:
         self.feedback_topic = rospy.get_param("~feedback_topic", "/joint_states_single")
         self.feedback_tolerance_rad = rospy.get_param("~feedback_tolerance_rad", 0.02)
         self.feedback_timeout_s = rospy.get_param("~feedback_timeout_s", 15.0)
+        self.gripper_service_name = rospy.get_param("~gripper_service", "/gripper_srv")
+        self.gripper_effort = rospy.get_param("~gripper_effort", 1.0)
+        self.gripper_feedback_tolerance_m = rospy.get_param("~gripper_feedback_tolerance_m", 0.003)
+        self.gripper_feedback_timeout_s = rospy.get_param("~gripper_feedback_timeout_s", 5.0)
+        self.gripper_service_wait_timeout_s = rospy.get_param("~gripper_service_wait_timeout_s", 5.0)
         self.latest_positions = {}
         self.command_publisher = rospy.Publisher(self.command_topic, JointState, queue_size=1)
+        self.gripper_service = rospy.ServiceProxy(self.gripper_service_name, Gripper)
         self.feedback_subscriber = rospy.Subscriber(
             self.feedback_topic, JointState, self.on_feedback, queue_size=1
         )
         self.server = actionlib.SimpleActionServer(
             "arm_controllers/follow_joint_trajectory",
             FollowJointTrajectoryAction,
-            execute_cb=self.execute,
+            execute_cb=self.execute_arm,
+            auto_start=False,
+        )
+        self.gripper_server = actionlib.SimpleActionServer(
+            "gripper_controller/follow_joint_trajectory",
+            FollowJointTrajectoryAction,
+            execute_cb=self.execute_gripper,
             auto_start=False,
         )
         self.server.start()
+        self.gripper_server.start()
         rospy.loginfo(
             "Piper trajectory bridge ready: MoveIt arm trajectories publish to %s and wait for %s",
             self.command_topic,
             self.feedback_topic,
         )
+        rospy.loginfo(
+            "Piper gripper trajectory bridge ready: MoveIt gripper trajectories call %s",
+            self.gripper_service_name,
+        )
 
     def on_feedback(self, state: JointState) -> None:
         self.latest_positions = dict(zip(state.name, state.position))
 
-    def reject(self, result: FollowJointTrajectoryResult, message: str) -> None:
+    def reject(self, result: FollowJointTrajectoryResult, message: str, server=None) -> None:
         result.error_code = FollowJointTrajectoryResult.INVALID_JOINTS
         result.error_string = message
-        self.server.set_aborted(result, message)
+        (server or self.server).set_aborted(result, message)
 
     def wait_for_final_position(self, target_positions) -> bool:
         deadline = rospy.Time.now() + rospy.Duration(self.feedback_timeout_s)
@@ -60,7 +80,29 @@ class PiperTrajectoryBridge:
             rate.sleep()
         return False
 
-    def execute(self, goal) -> None:
+    def get_gripper_position(self):
+        for name in GRIPPER_FEEDBACK_NAMES:
+            if name in self.latest_positions:
+                return abs(self.latest_positions[name])
+        return None
+
+    def wait_for_final_gripper_position(self, target_position: float) -> bool:
+        deadline = rospy.Time.now() + rospy.Duration(self.gripper_feedback_timeout_s)
+        rate = rospy.Rate(50)
+        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+            if self.gripper_server.is_preempt_requested():
+                self.gripper_server.set_preempted(text="Gripper trajectory preempted")
+                return False
+            actual_position = self.get_gripper_position()
+            if (
+                actual_position is not None
+                and abs(actual_position - abs(target_position)) <= self.gripper_feedback_tolerance_m
+            ):
+                return True
+            rate.sleep()
+        return False
+
+    def execute_arm(self, goal) -> None:
         trajectory = goal.trajectory
         result = FollowJointTrajectoryResult()
         if tuple(trajectory.joint_names) != ARM_JOINTS:
@@ -104,6 +146,85 @@ class PiperTrajectoryBridge:
 
         result.error_code = FollowJointTrajectoryResult.SUCCESSFUL
         self.server.set_succeeded(result, "Piper joint feedback reached final trajectory point")
+
+    def execute_gripper(self, goal) -> None:
+        trajectory = goal.trajectory
+        result = FollowJointTrajectoryResult()
+        if tuple(trajectory.joint_names) != (GRIPPER_JOINT,):
+            self.reject(
+                result,
+                f"Expected gripper joint {(GRIPPER_JOINT,)}, got {tuple(trajectory.joint_names)}",
+                self.gripper_server,
+            )
+            return
+        if not trajectory.points:
+            result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+            result.error_string = "Gripper trajectory contains no points"
+            self.gripper_server.set_aborted(result, result.error_string)
+            return
+        if any(len(point.positions) != 1 for point in trajectory.points):
+            result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+            result.error_string = "Each gripper trajectory point must contain one joint7 position"
+            self.gripper_server.set_aborted(result, result.error_string)
+            return
+
+        try:
+            rospy.wait_for_service(self.gripper_service_name, self.gripper_service_wait_timeout_s)
+        except rospy.ROSException as exc:
+            result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+            result.error_string = f"Timed out waiting for {self.gripper_service_name}: {exc}"
+            self.gripper_server.set_aborted(result, result.error_string)
+            return
+
+        started_at = rospy.Time.now()
+        for point in trajectory.points:
+            while not rospy.is_shutdown() and rospy.Time.now() - started_at < point.time_from_start:
+                if self.gripper_server.is_preempt_requested():
+                    self.gripper_server.set_preempted(text="Gripper trajectory preempted")
+                    return
+                rospy.sleep(0.002)
+
+            target_position = point.positions[0]
+            try:
+                response = self.gripper_service(
+                    gripper_angle=target_position,
+                    gripper_effort=self.gripper_effort,
+                    gripper_code=1,
+                    set_zero=0,
+                )
+            except rospy.ServiceException as exc:
+                result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+                result.error_string = f"Gripper service call failed: {exc}"
+                self.gripper_server.set_aborted(result, result.error_string)
+                return
+
+            if not response.status:
+                result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+                result.error_string = (
+                    f"Gripper service rejected command with code {getattr(response, 'code', 'unknown')}"
+                )
+                self.gripper_server.set_aborted(result, result.error_string)
+                return
+
+            actual_position = self.get_gripper_position()
+            feedback = FollowJointTrajectoryFeedback()
+            feedback.joint_names = [GRIPPER_JOINT]
+            feedback.desired.positions = [target_position]
+            feedback.desired.time_from_start = point.time_from_start
+            feedback.actual.positions = [actual_position if actual_position is not None else 0.0]
+            feedback.actual.time_from_start = point.time_from_start
+            self.gripper_server.publish_feedback(feedback)
+
+        if self.get_gripper_position() is not None and not self.wait_for_final_gripper_position(
+            trajectory.points[-1].positions[0]
+        ):
+            result.error_code = FollowJointTrajectoryResult.GOAL_TOLERANCE_VIOLATED
+            result.error_string = "Timed out waiting for Piper gripper feedback at final trajectory point"
+            self.gripper_server.set_aborted(result, result.error_string)
+            return
+
+        result.error_code = FollowJointTrajectoryResult.SUCCESSFUL
+        self.gripper_server.set_succeeded(result, "Piper gripper service accepted final trajectory point")
 
 
 def main() -> int:
