@@ -21,7 +21,7 @@ import shlex
 import time
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import cv2
@@ -96,6 +96,74 @@ except ImportError:
     from piper_image_sdk import ImageRecorder, Recorder
 
 
+ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
+ARM_JOINT_BOUNDS = (
+    (-2.618, 2.618),
+    (0.0, 3.14),
+    (-2.967, 0.0),
+    (-1.745, 1.745),
+    (-1.22, 1.22),
+    (-2.0944, 2.0944),
+)
+DEFAULT_JOINT_LIMIT_TOLERANCE_RAD = 0.002
+
+
+def normalize_arm_joint_targets(
+    joint_states: Sequence[float],
+    tolerance_rad: float = DEFAULT_JOINT_LIMIT_TOLERANCE_RAD,
+    logger: Optional[Callable[[str], None]] = None,
+):
+    """Clamp small numerical joint-limit drift before sending targets to MoveIt.
+
+    Values inside the MoveIt bounds are preserved exactly. Values outside a bound
+    by no more than tolerance_rad are clamped to that bound. Larger violations
+    are rejected so the SDK does not silently shrink the valid robot workspace.
+    """
+    if len(joint_states) != len(ARM_JOINT_NAMES):
+        raise ValueError(
+            f"joint_states must have {len(ARM_JOINT_NAMES)} elements, got {len(joint_states)}"
+        )
+
+    tolerance = float(tolerance_rad)
+    if tolerance < 0:
+        raise ValueError(f"joint limit tolerance must be non-negative, got {tolerance_rad}")
+
+    normalized = []
+    for joint_name, raw_value, (lower, upper) in zip(ARM_JOINT_NAMES, joint_states, ARM_JOINT_BOUNDS):
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise ValueError(f"{joint_name} target must be finite, got {raw_value!r}")
+
+        if lower <= value <= upper:
+            normalized.append(value)
+            continue
+
+        if lower - tolerance <= value < lower:
+            if logger is not None:
+                logger(
+                    f"Normalized {joint_name} target from {value:.9f} rad to lower bound "
+                    f"{lower:.9f} rad"
+                )
+            normalized.append(lower)
+            continue
+
+        if upper < value <= upper + tolerance:
+            if logger is not None:
+                logger(
+                    f"Normalized {joint_name} target from {value:.9f} rad to upper bound "
+                    f"{upper:.9f} rad"
+                )
+            normalized.append(upper)
+            continue
+
+        raise ValueError(
+            f"{joint_name} target {value:.9f} rad is outside MoveIt bounds "
+            f"[{lower:.9f}, {upper:.9f}] by more than tolerance {tolerance:.9f} rad"
+        )
+
+    return normalized
+
+
 @dataclass
 class CameraFrame:
     device_id: str
@@ -128,6 +196,10 @@ class PiperRobotEnv:
         self.NUM_JOINTS = piper_cfg.get("num_joints", 6)
         self.GRIPPER_MIN = piper_cfg.get("gripper_min", 0.0)
         self.GRIPPER_MAX = piper_cfg.get("gripper_max", 0.06)
+        self.JOINT_LIMIT_TOLERANCE_RAD = piper_cfg.get(
+            "joint_limit_tolerance_rad",
+            DEFAULT_JOINT_LIMIT_TOLERANCE_RAD,
+        )
 
         self._joint_state_topic = ros_cfg.get("joint_state_topic", "/joint_states_single")
         self._end_pose_topic = ros_cfg.get("end_pose_topic", "/end_pose")
@@ -201,11 +273,16 @@ class PiperRobotEnv:
         """通过 joint_moveit_ctrl_arm 服务控制 6 个关节"""
         vel = max_velocity or self.max_velocity
         acc = max_acceleration or self.max_acceleration
+        normalized_joints = normalize_arm_joint_targets(
+            joint_states,
+            self.JOINT_LIMIT_TOLERANCE_RAD,
+            rospy.logwarn,
+        )
 
         rospy.wait_for_service("joint_moveit_ctrl_arm", timeout=5.0)
         srv = rospy.ServiceProxy("joint_moveit_ctrl_arm", JointMoveitCtrl)
         req = JointMoveitCtrlRequest()
-        req.joint_states = list(joint_states)
+        req.joint_states = normalized_joints
         req.gripper = 0.0
         req.max_velocity = vel
         req.max_acceleration = acc
@@ -237,11 +314,16 @@ class PiperRobotEnv:
         """通过 joint_moveit_ctrl_piper 服务同时控制关节 + 夹爪"""
         vel = max_velocity or self.max_velocity
         acc = max_acceleration or self.max_acceleration
+        normalized_joints = normalize_arm_joint_targets(
+            joint_states,
+            self.JOINT_LIMIT_TOLERANCE_RAD,
+            rospy.logwarn,
+        )
 
         rospy.wait_for_service("joint_moveit_ctrl_piper", timeout=5.0)
         srv = rospy.ServiceProxy("joint_moveit_ctrl_piper", JointMoveitCtrl)
         req = JointMoveitCtrlRequest()
-        req.joint_states = list(joint_states)
+        req.joint_states = normalized_joints
         req.gripper = float(np.clip(gripper, self.GRIPPER_MIN, self.GRIPPER_MAX))
         req.max_velocity = vel
         req.max_acceleration = acc
@@ -339,9 +421,10 @@ class PiperRobotEnv:
         Returns:
             dict: {"success": bool}
         """
-        assert len(joint_states) == self.NUM_JOINTS, (
-            f"joint_states must have {self.NUM_JOINTS} elements, got {len(joint_states)}"
-        )
+        if len(joint_states) != self.NUM_JOINTS:
+            raise ValueError(
+                f"joint_states must have {self.NUM_JOINTS} elements, got {len(joint_states)}"
+            )
 
         if gripper is not None:
             ok = self._call_moveit_piper(joint_states, gripper, max_velocity, max_acceleration)
