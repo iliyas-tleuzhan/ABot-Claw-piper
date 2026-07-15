@@ -118,6 +118,7 @@ def build_robot_code(args: argparse.Namespace) -> str:
 import json
 import math
 import time
+import xml.etree.ElementTree as ET
 
 import cv2
 import numpy as np
@@ -432,29 +433,103 @@ def check_current_state_validity(planner):
         return {{"available": False, "valid": None, "error": str(exc)}}
 
 
+def joint_limits_from_robot_description(joint_names):
+    limits = {{}}
+    try:
+        root = ET.fromstring(rospy.get_param("/robot_description"))
+        wanted = set(joint_names)
+        for joint in root.findall("joint"):
+            name = joint.attrib.get("name")
+            if name not in wanted:
+                continue
+            limit = joint.find("limit")
+            if limit is None:
+                continue
+            lower = float(limit.attrib.get("lower", "-3.141592653589793"))
+            upper = float(limit.attrib.get("upper", "3.141592653589793"))
+            limits[name] = (lower, upper)
+    except Exception as exc:
+        print("JOINT_LIMIT_PARSE_WARNING " + str(exc))
+    return limits
+
+
+def clamp_joint(name, value, limits):
+    if name not in limits:
+        return float(value)
+    lower, upper = limits[name]
+    return float(max(lower, min(upper, value)))
+
+
+def ik_seed_states(planner):
+    current_state = planner.get_current_state()
+    joint_names = list(planner.get_active_joints())
+    current_values = [float(x) for x in planner.get_current_joint_values()]
+    limits = joint_limits_from_robot_description(joint_names)
+    offsets = [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.20, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [-0.20, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.10, -0.10, 0.0, 0.0, 0.0],
+        [0.0, -0.10, 0.10, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.35],
+        [0.0, 0.0, 0.0, 0.0, 0.0, -0.35],
+    ]
+    seeds = []
+    for index, offset in enumerate(offsets):
+        state = RobotState()
+        state.is_diff = True
+        state.joint_state.name = joint_names
+        positions = []
+        for joint_index, joint_name in enumerate(joint_names):
+            delta = offset[joint_index] if joint_index < len(offset) else 0.0
+            base = current_values[joint_index] if joint_index < len(current_values) else 0.0
+            positions.append(clamp_joint(joint_name, base + delta, limits))
+        state.joint_state.position = positions
+        seeds.append({{
+            "index": index,
+            "label": "current" if index == 0 else "offset_%d" % index,
+            "state": state,
+            "joint_positions": [float(x) for x in positions],
+        }})
+    return seeds
+
+
 def check_pose_ik(planner, pose):
     try:
-        rospy.wait_for_service("/compute_ik", timeout=2.0)
+        rospy.wait_for_service("/compute_ik", timeout=5.0)
         service = rospy.ServiceProxy("/compute_ik", GetPositionIK)
-        req = GetPositionIKRequest()
-        req.ik_request.group_name = "arm"
-        req.ik_request.ik_link_name = TCP_LINK
-        req.ik_request.robot_state = planner.get_current_state()
-        req.ik_request.avoid_collisions = True
-        req.ik_request.timeout = rospy.Duration(2.0)
-        stamped = PoseStamped()
-        stamped.header.frame_id = planner.get_planning_frame()
-        stamped.header.stamp = rospy.Time.now()
-        stamped.pose = pose
-        req.ik_request.pose_stamped = stamped
-        resp = service(req)
+        results = []
+        for seed in ik_seed_states(planner):
+            req = GetPositionIKRequest()
+            req.ik_request.group_name = "arm"
+            req.ik_request.ik_link_name = TCP_LINK
+            req.ik_request.robot_state = seed["state"]
+            req.ik_request.avoid_collisions = True
+            req.ik_request.timeout = rospy.Duration(5.0)
+            stamped = PoseStamped()
+            stamped.header.frame_id = planner.get_planning_frame()
+            stamped.header.stamp = rospy.Time.now()
+            stamped.pose = pose
+            req.ik_request.pose_stamped = stamped
+            resp = service(req)
+            results.append({{
+                "seed_index": seed["index"],
+                "seed_label": seed["label"],
+                "success": resp.error_code.val == MoveItErrorCodes.SUCCESS,
+                "error": moveit_error_summary(resp.error_code),
+            }})
+        success = any(item["success"] for item in results)
+        first_error = next((item["error"] for item in results if item["success"]), None)
+        if first_error is None and results:
+            first_error = results[0]["error"]
         return {{
             "available": True,
-            "success": resp.error_code.val == MoveItErrorCodes.SUCCESS,
-            "error": moveit_error_summary(resp.error_code),
+            "success": success,
+            "error": first_error,
+            "seeds": results,
         }}
     except Exception as exc:
-        return {{"available": False, "success": False, "error": str(exc)}}
+        return {{"available": False, "success": False, "error": str(exc), "seeds": []}}
 
 
 def summarize_plan(name, result, raise_on_failure=True):
@@ -584,7 +659,7 @@ def reachability_diagnostic(tcp_xyz, candidate, world_link6_to_tcp):
 
 
 def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
-    failures = []
+    rows = []
     hover_height = float(CONFIG["hover_height"])
     minimum_link6_transit_z = float(CONFIG["transit_z"])
     for index, candidate in enumerate(top_down_orientation_candidates(current_tcp_pose)):
@@ -598,15 +673,15 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
         print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
         ik_result = check_pose_ik(planner, hover_pose)
         print("TCP_IK_CANDIDATE_JSON " + json.dumps({{
+            "index": index,
             "yaw_rad": float(candidate["yaw_rad"]),
+            "yaw_deg": math.degrees(float(candidate["yaw_rad"])),
             "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
             "success": bool(ik_result.get("success")),
             "error": ik_result.get("error"),
             "available": bool(ik_result.get("available")),
+            "seeds": ik_result.get("seeds", []),
         }}, sort_keys=True))
-        if not ik_result.get("success"):
-            failures.append({{"candidate": candidate, "height_plan": height_plan, "reachability": reachability, "ik": ik_result}})
-            continue
         planner.set_start_state_to_current_state()
         trajectory, summary = plan_target(
             planner,
@@ -615,6 +690,18 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             quat,
             raise_on_failure=False,
         )
+        row = {{
+            "index": index,
+            "yaw_deg": math.degrees(float(candidate["yaw_rad"])),
+            "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+            "ik_success": bool(ik_result.get("success")),
+            "ik_error": ik_result.get("error"),
+            "planner_success": bool(summary.get("success")),
+            "planner_error": summary.get("error"),
+            "trajectory_points": int(summary.get("points", 0)),
+        }}
+        rows.append(row)
+        print("TCP_CANDIDATE_RESULT_JSON " + json.dumps(row, sort_keys=True))
         if summary.get("success") and summary.get("points", 0) > 0:
             summary["name"] = "transit_to_source_hover"
             summary["selected_yaw_candidate"] = candidate
@@ -624,8 +711,12 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             print("SELECTED_TCP_YAW_CANDIDATE_JSON " + json.dumps(candidate, sort_keys=True))
             print("SELECTED_TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
             return trajectory, summary, candidate, hover_pose
-        failures.append({{"candidate": candidate, "height_plan": height_plan, "reachability": reachability, "ik": ik_result, "summary": summary}})
-    print("TCP_YAW_CANDIDATE_FAILURES_JSON " + json.dumps(failures, sort_keys=True))
+    print("TCP_YAW_CANDIDATE_SUMMARY_JSON " + json.dumps({{
+        "candidate_count": len(rows),
+        "planner_success_count": sum(1 for row in rows if row["planner_success"]),
+        "ik_success_count": sum(1 for row in rows if row["ik_success"]),
+        "rows": rows,
+    }}, sort_keys=True))
     raise RuntimeError("MoveIt planning failed for transit_to_source_hover for all top-down TCP yaw candidates")
 
 
@@ -968,6 +1059,10 @@ if selected_tcp_link != TCP_LINK:
 planner.set_max_velocity_scaling_factor(float(CONFIG["velocity_scaling"]))
 planner.set_max_acceleration_scaling_factor(float(CONFIG["acceleration_scaling"]))
 planner.set_start_state_to_current_state()
+planner.set_planning_time(10.0)
+planner.set_num_planning_attempts(20)
+planner.set_goal_position_tolerance(0.005)
+planner.set_goal_orientation_tolerance(math.radians(5.0))
 
 plans = {{}}
 summaries = []
