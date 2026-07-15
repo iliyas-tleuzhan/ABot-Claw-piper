@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+DEFAULT_REPO_ROOT = "/home/dase-hw101/ABot-Claw"
+
 STOP_WORDS = {
     "the",
     "a",
@@ -26,6 +28,7 @@ SOURCE_VERBS = (
     "grab",
     "move",
     "put",
+    "place",
 )
 
 DESTINATION_MARKERS = (
@@ -45,8 +48,8 @@ class ManipulationTask:
     destination: Optional[str]
     selected_robot: str = "Piper"
 
-    def command(self, execute: bool = False) -> list[str]:
-        cmd = [
+    def runner_args(self, execute: bool = False) -> list[str]:
+        args = [
             "python3",
             "robot_layer/arm_piper/agent_server/run_piper_manipulation.py",
             "--task",
@@ -55,12 +58,19 @@ class ManipulationTask:
             self.source,
         ]
         if self.destination:
-            cmd.extend(["--destination", self.destination])
-        cmd.append("--execute" if execute else "--plan-only")
-        return cmd
+            args.extend(["--destination", self.destination])
+        args.append("--execute" if execute else "--plan-only")
+        return args
 
-    def to_dict(self, execute: bool = False) -> dict:
-        cmd = self.command(execute)
+    def shell_command(self, execute: bool = False, repo_root: str = DEFAULT_REPO_ROOT) -> str:
+        runner = " ".join(shlex.quote(part) for part in self.runner_args(execute))
+        return "cd " + shlex.quote(repo_root) + " && " + runner
+
+    def command(self, execute: bool = False, repo_root: str = DEFAULT_REPO_ROOT) -> list[str]:
+        return ["bash", "-lc", self.shell_command(execute, repo_root)]
+
+    def to_dict(self, execute: bool = False, repo_root: str = DEFAULT_REPO_ROOT) -> dict:
+        cmd = self.command(execute, repo_root)
         return {
             "action": self.action,
             "source": self.source,
@@ -68,7 +78,7 @@ class ManipulationTask:
             "destination": self.destination,
             "selected_robot": self.selected_robot,
             "command": cmd,
-            "command_text": " ".join(shlex.quote(part) for part in cmd),
+            "command_text": self.shell_command(execute, repo_root),
         }
 
 
@@ -96,7 +106,7 @@ def strip_source_verb(text: str) -> tuple[str, str]:
     for verb in SOURCE_VERBS:
         if text.startswith(verb + " "):
             return verb, text[len(verb):].strip()
-    match = re.search(r"\\b(" + "|".join(re.escape(v) for v in SOURCE_VERBS) + r")\\b\\s+(.+)", text)
+    match = re.search(r"\b(" + "|".join(re.escape(v) for v in SOURCE_VERBS) + r")\b\s+(.+)", text)
     if match:
         return match.group(1), match.group(2).strip()
     raise ValueError("No manipulation action found")
@@ -144,9 +154,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("message")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--repo-root", default=DEFAULT_REPO_ROOT)
     args = parser.parse_args()
     task = parse_task(args.message)
-    print(json.dumps(task.to_dict(execute=args.execute), sort_keys=True))
+    print(json.dumps(task.to_dict(execute=args.execute, repo_root=args.repo_root), sort_keys=True))
     return 0
 
 

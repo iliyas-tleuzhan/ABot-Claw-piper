@@ -691,6 +691,14 @@ handeye_backend_ready() {
     rosnode_matches_live '^/piper_d555_eye_on_base/easy_handeye_calibration_server$'
 }
 
+saved_handeye_publisher_ready() {
+    container_exec "pgrep -af 'roslaunch easy_handeye publish.launch.*namespace_prefix:=piper_d555' >/dev/null 2>&1"
+}
+
+saved_camera_tf_ready() {
+    tf_ready base_link table_camera_color_optical_frame
+}
+
 handeye_gui_ready() {
     rosnode_matches_live '^/piper_d555_eye_on_base/(.*rqt.*|rqt_gui_py_node_[0-9]+)$'
 }
@@ -719,34 +727,20 @@ start_handeye_gui_only() {
 }
 
 start_handeye() {
-    stage="Easy Handeye"
+    stage="saved Easy Handeye TF publisher"
     if [[ "${MODE}" == "status" ]]; then
         return 0
     fi
-    if handeye_backend_ready; then
-        log "Easy Handeye backend is already running; reusing it to preserve any live samples."
-        start_handeye_gui_only
+    if saved_handeye_publisher_ready && saved_camera_tf_ready; then
+        log "Saved Easy Handeye TF publisher is already running and base_link -> table_camera_color_optical_frame is valid."
         return 0
     fi
-    if ! easy_handeye_opencv_preflight 2>&1 | tee -a "${LOG_DIR}/handeye-opencv-preflight.log"; then
-        echo "ERROR: Easy Handeye OpenCV preflight failed; cv2.calibrateHandEye is unavailable." >&2
-        exit 1
-    fi
-    local sampling_gui_arg="start_sampling_gui:=true"
-    if [[ "${X11_AVAILABLE}" != "true" ]]; then
-        sampling_gui_arg="start_sampling_gui:=false"
-        set_status "rqt_easy_handeye sampling GUI" "not started: DISPLAY unavailable"
-    fi
     local cmd
-    cmd="mkdir -p $(printf '%q' "${LOG_DIR}"); exec docker exec -i ${DOCKER_X11_ARGS} ${CONTAINER} bash -lc 'source /opt/ros/noetic/setup.bash; source ${ROS_WS}/devel/setup.bash; source ${EASY_HANDEYE_WS}/devel/setup.bash; export PYTHONPATH=${EASY_HANDEYE_SYSTEM_CV_PATH}:\${PYTHONPATH:-}; export ROS_MASTER_URI=http://localhost:11311; export ROS_HOSTNAME=localhost; python3 - <<\"PY\"
-import cv2
-print(cv2.__version__)
-print(cv2.__file__)
-print(hasattr(cv2, \"calibrateHandEye\"))
-raise SystemExit(0 if hasattr(cv2, \"calibrateHandEye\") else 42)
-PY
-exec roslaunch easy_handeye calibrate.launch eye_on_hand:=false namespace_prefix:=piper_d555 robot_base_frame:=base_link robot_effector_frame:=gripper_base tracking_base_frame:=table_camera_color_optical_frame tracking_marker_frame:=aruco_marker_frame freehand_robot_movement:=true start_rviz:=false publish_dummy:=true ${sampling_gui_arg}' 2>&1 | tee -a $(printf '%q' "${LOG_DIR}/handeye.log")"
-    tmux_replace_window "handeye" "${cmd}"
+    cmd="mkdir -p $(printf '%q' "${LOG_DIR}"); exec docker exec -i ${CONTAINER} bash -lc 'source /opt/ros/noetic/setup.bash; source ${ROS_WS}/devel/setup.bash; source ${EASY_HANDEYE_WS}/devel/setup.bash; export ROS_MASTER_URI=http://localhost:11311; export ROS_HOSTNAME=localhost; roslaunch easy_handeye publish.launch eye_on_hand:=false namespace_prefix:=piper_d555' 2>&1 | tee -a $(printf '%q' "${LOG_DIR}/handeye-publisher.log")"
+    tmux_replace_window "handeye-publisher" "${cmd}"
+    wait_until "saved camera TF base_link -> table_camera_color_optical_frame" 20 1 saved_camera_tf_ready || true
+    log "Saved hand-eye TF command: roslaunch easy_handeye publish.launch eye_on_hand:=false namespace_prefix:=piper_d555"
+    log "Saved camera TF verification command: rosrun tf tf_echo base_link table_camera_color_optical_frame"
 }
 
 rviz_ready() {
@@ -800,8 +794,10 @@ update_local_status() {
     node_ready /aruco_simple && set_status "ArUco node" "running" || set_status "ArUco node" "not ready"
     topic_ready /aruco_simple/pose && set_status "ArUco pose topic" "ok" || set_status "ArUco pose topic" "waiting for marker/subscriber"
     tf_ready table_camera_color_optical_frame aruco_marker_frame && set_status "marker TF" "ok" || set_status "marker TF" "waiting for marker"
-    handeye_backend_ready && set_status "Easy Handeye backend" "running" || set_status "Easy Handeye backend" "not ready"
-    handeye_gui_ready && set_status "rqt_easy_handeye sampling GUI" "running" || : "${STATUS["rqt_easy_handeye sampling GUI"]:=not running}"
+    saved_handeye_publisher_ready && set_status "saved hand-eye TF publisher" "running" || set_status "saved hand-eye TF publisher" "not ready"
+    saved_camera_tf_ready && set_status "saved camera TF" "valid" || set_status "saved camera TF" "not ready"
+    handeye_backend_ready && set_status "calibration backend" "unexpectedly running" || set_status "calibration backend" "not expected in runtime mode"
+    handeye_gui_ready && set_status "rqt_easy_handeye sampling GUI" "unexpectedly running" || : "${STATUS["rqt_easy_handeye sampling GUI"]:=not expected in runtime mode}"
     rviz_ready && set_status "RViz" "running" || : "${STATUS["RViz"]:=not ready}"
 }
 
@@ -861,7 +857,9 @@ Local:
   ArUco node:                          ${STATUS["ArUco node"]:-unknown}
   ArUco pose topic:                    ${STATUS["ArUco pose topic"]:-unknown}
   marker TF:                           ${STATUS["marker TF"]:-unknown}
-  Easy Handeye backend:                ${STATUS["Easy Handeye backend"]:-unknown}
+  saved hand-eye TF publisher:         ${STATUS["saved hand-eye TF publisher"]:-unknown}
+  saved camera TF:                     ${STATUS["saved camera TF"]:-unknown}
+  calibration backend:                 ${STATUS["calibration backend"]:-unknown}
   rqt_easy_handeye sampling GUI:       ${STATUS["rqt_easy_handeye sampling GUI"]:-unknown}
   RViz:                                ${STATUS["RViz"]:-unknown}
 

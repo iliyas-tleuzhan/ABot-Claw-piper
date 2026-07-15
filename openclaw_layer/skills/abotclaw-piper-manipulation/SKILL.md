@@ -40,6 +40,7 @@ Do not require an exact phrase match.
 For pickup-only:
 
 ```bash
+cd /home/dase-hw101/ABot-Claw &&
 python3 robot_layer/arm_piper/agent_server/run_piper_manipulation.py \
   --task pick \
   --source cup \
@@ -49,6 +50,7 @@ python3 robot_layer/arm_piper/agent_server/run_piper_manipulation.py \
 For pick and place:
 
 ```bash
+cd /home/dase-hw101/ABot-Claw &&
 python3 robot_layer/arm_piper/agent_server/run_piper_manipulation.py \
   --task place \
   --source cup \
