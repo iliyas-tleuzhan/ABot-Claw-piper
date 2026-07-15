@@ -122,16 +122,19 @@ import time
 import cv2
 import numpy as np
 import rospy
-from geometry_msgs.msg import Point, Pose
+from geometry_msgs.msg import Point, Pose, PoseStamped
 from moveit_commander import MoveGroupCommander
 from moveit_msgs.msg import MoveItErrorCodes, RobotState
-from moveit_msgs.srv import GetStateValidity, GetStateValidityRequest
+from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest, GetStateValidity, GetStateValidityRequest
 from visualization_msgs.msg import Marker
 
 CONFIG = {repr(cfg)}
 TCP_LINK = "gripper_tcp"
 LINK6_TO_TCP_TRANSLATION = [0.0, 0.0, 0.1358]
 LINK6_TO_TCP_QUAT = [0.0, 0.0, 0.0, 1.0]
+# Current TCP depth is the modeled midpoint of the two finger joint origins.
+# It has not yet been physically measured at the real fingertip contact depth.
+TCP_MODELED_APPROACH_DEPTH_M = 0.1358
 TCP_LOCAL_APPROACH_AXIS = [0.0, 0.0, 1.0]
 TCP_LOCAL_CLOSING_AXIS = [0.0, 1.0, 0.0]
 TARGET_APPROACH_AXIS = [0.0, 0.0, -1.0]
@@ -201,11 +204,11 @@ def quat_to_rot_xyzw(q):
     ], dtype=float)
 
 
-def compute_top_down_tcp_orientation(closing_target_axis=None):
+def compute_tcp_orientation(approach_target_axis, closing_target_axis):
     approach_local = unit_vec("tcp_local_approach_axis", TCP_LOCAL_APPROACH_AXIS)
     closing_local = unit_vec("tcp_local_closing_axis", TCP_LOCAL_CLOSING_AXIS)
-    approach_target = unit_vec("target_approach_axis", TARGET_APPROACH_AXIS)
-    closing_target = unit_vec("target_closing_axis", closing_target_axis or TARGET_CLOSING_AXIS)
+    approach_target = unit_vec("target_approach_axis", approach_target_axis)
+    closing_target = unit_vec("target_closing_axis", closing_target_axis)
     if abs(float(np.dot(approach_local, closing_local))) > 1e-6:
         raise RuntimeError("TCP approach and closing axes are not orthogonal")
     if abs(float(np.dot(approach_target, closing_target))) > 1e-6:
@@ -226,6 +229,10 @@ def compute_top_down_tcp_orientation(closing_target_axis=None):
     return quat, [float(x) for x in target_approach.tolist()], [float(x) for x in target_closing.tolist()], angle
 
 
+def compute_top_down_tcp_orientation(closing_target_axis=None):
+    return compute_tcp_orientation(TARGET_APPROACH_AXIS, closing_target_axis or TARGET_CLOSING_AXIS)
+
+
 def top_down_orientation_candidates(current_tcp_pose):
     rot = quat_to_rot_xyzw([
         current_tcp_pose.orientation.x,
@@ -243,6 +250,7 @@ def top_down_orientation_candidates(current_tcp_pose):
     offsets = [0.0, math.pi / 4.0, -math.pi / 4.0, math.pi / 2.0, -math.pi / 2.0, math.pi, 3.0 * math.pi / 4.0, -3.0 * math.pi / 4.0]
     seen = set()
     candidates = []
+    tilt_degrees = [0.0, 3.0, -3.0, 5.0, -5.0]
     for offset in offsets:
         yaw = math.atan2(math.sin(base_yaw + offset), math.cos(base_yaw + offset))
         key = round(yaw, 6)
@@ -250,15 +258,26 @@ def top_down_orientation_candidates(current_tcp_pose):
             continue
         seen.add(key)
         closing = [math.cos(yaw), math.sin(yaw), 0.0]
-        quat, approach_axis, closing_axis, angle = compute_top_down_tcp_orientation(closing)
-        candidates.append({{
-            "yaw_rad": float(yaw),
-            "closing_axis": [float(x) for x in closing],
-            "quat": quat,
-            "approach_axis": approach_axis,
-            "target_closing_axis": closing_axis,
-            "approach_angle_deg": angle,
-        }})
+        closing_vec = unit_vec("candidate_closing_axis", closing)
+        lateral_vec = np.cross(closing_vec, np.array([0.0, 0.0, -1.0], dtype=float))
+        lateral_vec /= np.linalg.norm(lateral_vec)
+        for tilt_deg in tilt_degrees:
+            tilt_rad = math.radians(abs(tilt_deg))
+            tilt_sign = 1.0 if tilt_deg >= 0.0 else -1.0
+            approach = np.array([0.0, 0.0, -math.cos(tilt_rad)], dtype=float) + lateral_vec * (tilt_sign * math.sin(tilt_rad))
+            approach /= np.linalg.norm(approach)
+            adjusted_closing = closing_vec - approach * float(np.dot(closing_vec, approach))
+            adjusted_closing /= np.linalg.norm(adjusted_closing)
+            quat, approach_axis, closing_axis, angle = compute_tcp_orientation(approach, adjusted_closing)
+            candidates.append({{
+                "yaw_rad": float(yaw),
+                "tilt_deg": float(tilt_deg),
+                "closing_axis": [float(x) for x in closing],
+                "quat": quat,
+                "approach_axis": approach_axis,
+                "target_closing_axis": closing_axis,
+                "approach_angle_deg": angle,
+            }})
     return candidates
 
 
@@ -413,6 +432,31 @@ def check_current_state_validity(planner):
         return {{"available": False, "valid": None, "error": str(exc)}}
 
 
+def check_pose_ik(planner, pose):
+    try:
+        rospy.wait_for_service("/compute_ik", timeout=2.0)
+        service = rospy.ServiceProxy("/compute_ik", GetPositionIK)
+        req = GetPositionIKRequest()
+        req.ik_request.group_name = "arm"
+        req.ik_request.ik_link_name = TCP_LINK
+        req.ik_request.robot_state = planner.get_current_state()
+        req.ik_request.avoid_collisions = True
+        req.ik_request.timeout = rospy.Duration(2.0)
+        stamped = PoseStamped()
+        stamped.header.frame_id = planner.get_planning_frame()
+        stamped.header.stamp = rospy.Time.now()
+        stamped.pose = pose
+        req.ik_request.pose_stamped = stamped
+        resp = service(req)
+        return {{
+            "available": True,
+            "success": resp.error_code.val == MoveItErrorCodes.SUCCESS,
+            "error": moveit_error_summary(resp.error_code),
+        }}
+    except Exception as exc:
+        return {{"available": False, "success": False, "error": str(exc)}}
+
+
 def summarize_plan(name, result, raise_on_failure=True):
     if isinstance(result, tuple):
         success = bool(result[0])
@@ -506,12 +550,63 @@ def plan_target(planner, name, xyz, quat, start_state=None, raise_on_failure=Tru
     return trajectory, summary
 
 
-def plan_transit_to_source_hover(planner, xyz, current_tcp_pose):
+def tcp_height_plan(source_z, hover_height, minimum_link6_transit_z, candidate):
+    rot = quat_to_rot_xyzw(candidate["quat"])
+    world_link6_to_tcp = rot.dot(np.asarray(LINK6_TO_TCP_TRANSLATION, dtype=float))
+    tcp_z_from_object_clearance = float(source_z) + float(hover_height)
+    tcp_z_from_link6_clearance = float(minimum_link6_transit_z) + float(world_link6_to_tcp[2])
+    selected_tcp_hover_z = max(tcp_z_from_object_clearance, tcp_z_from_link6_clearance)
+    return {{
+        "source_surface_z": float(source_z),
+        "hover_height": float(hover_height),
+        "minimum_link6_transit_z": float(minimum_link6_transit_z),
+        "tcp_z_from_object_clearance": tcp_z_from_object_clearance,
+        "tcp_z_from_link6_clearance": tcp_z_from_link6_clearance,
+        "selected_tcp_hover_z": selected_tcp_hover_z,
+        "world_link6_to_tcp_translation": [float(x) for x in world_link6_to_tcp.tolist()],
+    }}
+
+
+def reachability_diagnostic(tcp_xyz, candidate, world_link6_to_tcp):
+    tcp = np.asarray(tcp_xyz, dtype=float)
+    offset = np.asarray(world_link6_to_tcp, dtype=float)
+    link6 = tcp - offset
+    return {{
+        "tcp_hover_xyz": [float(x) for x in tcp.tolist()],
+        "target_tcp_quaternion": candidate["quat"],
+        "world_link6_to_tcp_translation": [float(x) for x in offset.tolist()],
+        "implied_link6_xyz": [float(x) for x in link6.tolist()],
+        "base_to_tcp_distance_m": float(np.linalg.norm(tcp)),
+        "base_to_link6_distance_m": float(np.linalg.norm(link6)),
+        "yaw_rad": float(candidate["yaw_rad"]),
+        "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+    }}
+
+
+def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     failures = []
+    hover_height = float(CONFIG["hover_height"])
+    minimum_link6_transit_z = float(CONFIG["transit_z"])
     for index, candidate in enumerate(top_down_orientation_candidates(current_tcp_pose)):
         quat = candidate["quat"]
+        height_plan = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, candidate)
+        xyz = [source_base[0], source_base[1], height_plan["selected_tcp_hover_z"]]
         hover_pose = pose_msg(xyz, quat)
         assert_workspace("source_hover candidate %d" % index, xyz)
+        reachability = reachability_diagnostic(xyz, candidate, height_plan["world_link6_to_tcp_translation"])
+        print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
+        print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
+        ik_result = check_pose_ik(planner, hover_pose)
+        print("TCP_IK_CANDIDATE_JSON " + json.dumps({{
+            "yaw_rad": float(candidate["yaw_rad"]),
+            "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+            "success": bool(ik_result.get("success")),
+            "error": ik_result.get("error"),
+            "available": bool(ik_result.get("available")),
+        }}, sort_keys=True))
+        if not ik_result.get("success"):
+            failures.append({{"candidate": candidate, "height_plan": height_plan, "reachability": reachability, "ik": ik_result}})
+            continue
         planner.set_start_state_to_current_state()
         trajectory, summary = plan_target(
             planner,
@@ -523,9 +618,13 @@ def plan_transit_to_source_hover(planner, xyz, current_tcp_pose):
         if summary.get("success") and summary.get("points", 0) > 0:
             summary["name"] = "transit_to_source_hover"
             summary["selected_yaw_candidate"] = candidate
+            summary["height_plan"] = height_plan
+            summary["reachability"] = reachability
+            summary["ik"] = ik_result
             print("SELECTED_TCP_YAW_CANDIDATE_JSON " + json.dumps(candidate, sort_keys=True))
+            print("SELECTED_TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
             return trajectory, summary, candidate, hover_pose
-        failures.append({{"candidate": candidate, "summary": summary}})
+        failures.append({{"candidate": candidate, "height_plan": height_plan, "reachability": reachability, "ik": ik_result, "summary": summary}})
     print("TCP_YAW_CANDIDATE_FAILURES_JSON " + json.dumps(failures, sort_keys=True))
     raise RuntimeError("MoveIt planning failed for transit_to_source_hover for all top-down TCP yaw candidates")
 
@@ -820,7 +919,6 @@ if CONFIG["destination_perception_only"]:
 current_pose = env.get_robot_end_pose()
 if current_pose is None:
     raise RuntimeError("No current end-effector pose from /end_pose")
-current_xyz = finite_vec("current_end_effector.position", current_pose.get("position"), 3)
 
 source_detection = select_source()
 source_camera = source_detection["camera_xyz"]
@@ -859,8 +957,6 @@ if CONFIG["perception_only"]:
     print("PERCEPTION_ONLY_COMPLETE")
     raise SystemExit(0)
 
-transit_z = max(float(CONFIG["transit_z"]), current_xyz[2], source_base[2] + float(CONFIG["hover_height"]))
-hover_z = max(transit_z, source_base[2] + float(CONFIG["hover_height"]))
 grasp_z = source_base[2] + float(CONFIG["grasp_z_offset"])
 
 planner = MoveGroupCommander("arm")
@@ -882,7 +978,7 @@ print("CURRENT_TCP_POSE_JSON " + json.dumps(pose_to_dict(current_tcp_pose), sort
 
 transit_trajectory, transit_summary, yaw_candidate, source_hover_pose = plan_transit_to_source_hover(
     planner,
-    [source_base[0], source_base[1], hover_z],
+    source_base,
     current_tcp_pose,
 )
 target_tcp_quat = yaw_candidate["quat"]
@@ -956,7 +1052,14 @@ destination_rise_name = None
 if CONFIG["task"] == "place":
     if destination_base is None:
         raise RuntimeError("Place task requires a detected destination")
-    dest_hover_z = max(transit_z, destination_base[2] + float(CONFIG["hover_height"]))
+    dest_height_plan = tcp_height_plan(
+        destination_base[2],
+        float(CONFIG["hover_height"]),
+        float(CONFIG["transit_z"]),
+        yaw_candidate,
+    )
+    print("DESTINATION_TCP_HEIGHT_PLAN_JSON " + json.dumps(dest_height_plan, sort_keys=True))
+    dest_hover_z = dest_height_plan["selected_tcp_hover_z"]
     place_z = destination_base[2] + float(CONFIG["place_z_offset"])
     destination_hover_pose = pose_msg([destination_base[0], destination_base[1], dest_hover_z], target_tcp_quat)
     destination_place_pose = pose_msg([destination_base[0], destination_base[1], place_z], target_tcp_quat)
