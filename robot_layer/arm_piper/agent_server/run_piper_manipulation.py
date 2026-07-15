@@ -73,7 +73,8 @@ import numpy as np
 import rospy
 from geometry_msgs.msg import Pose
 from moveit_commander import MoveGroupCommander
-from moveit_msgs.msg import RobotState
+from moveit_msgs.msg import MoveItErrorCodes, RobotState
+from moveit_msgs.srv import GetStateValidity, GetStateValidityRequest
 
 CONFIG = {repr(cfg)}
 DOWNWARD_QUAT = [0.0, 0.7071067811865476, 0.0, 0.7071067811865476]
@@ -144,12 +145,75 @@ def trajectory_point_count(trajectory):
     return len(getattr(getattr(trajectory, "joint_trajectory", None), "points", []))
 
 
+MOVEIT_ERROR_NAMES = {{
+    MoveItErrorCodes.SUCCESS: "SUCCESS",
+    MoveItErrorCodes.FAILURE: "FAILURE",
+    MoveItErrorCodes.PLANNING_FAILED: "PLANNING_FAILED",
+    MoveItErrorCodes.INVALID_MOTION_PLAN: "INVALID_MOTION_PLAN",
+    MoveItErrorCodes.MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE: "MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE",
+    MoveItErrorCodes.CONTROL_FAILED: "CONTROL_FAILED",
+    MoveItErrorCodes.UNABLE_TO_AQUIRE_SENSOR_DATA: "UNABLE_TO_AQUIRE_SENSOR_DATA",
+    MoveItErrorCodes.TIMED_OUT: "TIMED_OUT",
+    MoveItErrorCodes.PREEMPTED: "PREEMPTED",
+    MoveItErrorCodes.START_STATE_IN_COLLISION: "START_STATE_IN_COLLISION",
+    MoveItErrorCodes.START_STATE_VIOLATES_PATH_CONSTRAINTS: "START_STATE_VIOLATES_PATH_CONSTRAINTS",
+    MoveItErrorCodes.GOAL_IN_COLLISION: "GOAL_IN_COLLISION",
+    MoveItErrorCodes.GOAL_VIOLATES_PATH_CONSTRAINTS: "GOAL_VIOLATES_PATH_CONSTRAINTS",
+    MoveItErrorCodes.GOAL_CONSTRAINTS_VIOLATED: "GOAL_CONSTRAINTS_VIOLATED",
+    MoveItErrorCodes.INVALID_GROUP_NAME: "INVALID_GROUP_NAME",
+    MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS: "INVALID_GOAL_CONSTRAINTS",
+    MoveItErrorCodes.INVALID_ROBOT_STATE: "INVALID_ROBOT_STATE",
+    MoveItErrorCodes.INVALID_LINK_NAME: "INVALID_LINK_NAME",
+    MoveItErrorCodes.INVALID_OBJECT_NAME: "INVALID_OBJECT_NAME",
+    MoveItErrorCodes.FRAME_TRANSFORM_FAILURE: "FRAME_TRANSFORM_FAILURE",
+    MoveItErrorCodes.COLLISION_CHECKING_UNAVAILABLE: "COLLISION_CHECKING_UNAVAILABLE",
+    MoveItErrorCodes.ROBOT_STATE_STALE: "ROBOT_STATE_STALE",
+    MoveItErrorCodes.SENSOR_INFO_STALE: "SENSOR_INFO_STALE",
+    MoveItErrorCodes.NO_IK_SOLUTION: "NO_IK_SOLUTION",
+}}
+
+
+def moveit_error_summary(error_code):
+    value = getattr(error_code, "val", None)
+    if value is None:
+        return str(error_code)
+    return "%s(%s)" % (MOVEIT_ERROR_NAMES.get(value, "UNKNOWN"), value)
+
+
+def trajectory_joint_summary(trajectory):
+    jt = getattr(trajectory, "joint_trajectory", None)
+    points = list(getattr(jt, "points", []))
+    if not points:
+        return {{"first_joint_positions": [], "final_joint_positions": []}}
+    return {{
+        "first_joint_positions": [float(x) for x in points[0].positions],
+        "final_joint_positions": [float(x) for x in points[-1].positions],
+    }}
+
+
+def check_current_state_validity(planner):
+    try:
+        rospy.wait_for_service("/check_state_validity", timeout=2.0)
+        service = rospy.ServiceProxy("/check_state_validity", GetStateValidity)
+        req = GetStateValidityRequest()
+        req.robot_state = planner.get_current_state()
+        req.group_name = "arm"
+        resp = service(req)
+        return {{
+            "available": True,
+            "valid": bool(resp.valid),
+            "contacts": len(getattr(resp, "contacts", [])),
+        }}
+    except Exception as exc:
+        return {{"available": False, "valid": None, "error": str(exc)}}
+
+
 def summarize_plan(name, result):
     if isinstance(result, tuple):
         success = bool(result[0])
         trajectory = result[1]
         planning_time = float(result[2]) if len(result) > 2 else 0.0
-        error_code = str(result[3]) if len(result) > 3 else ""
+        error_code = moveit_error_summary(result[3]) if len(result) > 3 else ""
     else:
         trajectory = result
         points = getattr(getattr(trajectory, "joint_trajectory", None), "points", [])
@@ -162,8 +226,17 @@ def summarize_plan(name, result):
         name, success, count, planning_time, error_code
     ))
     if not success or count == 0:
-        raise RuntimeError("MoveIt planning failed for " + name)
-    return trajectory, {{"name": name, "success": success, "points": count, "planning_time": planning_time, "error": error_code}}
+        raise RuntimeError("MoveIt planning failed for %s: error=%s points=%d" % (name, error_code, count))
+    summary = {{
+        "name": name,
+        "type": "pose_target",
+        "success": success,
+        "points": count,
+        "planning_time": planning_time,
+        "error": error_code,
+    }}
+    summary.update(trajectory_joint_summary(trajectory))
+    return trajectory, summary
 
 
 def retime_trajectory(planner, start_state, trajectory):
@@ -189,36 +262,39 @@ def plan_cartesian(planner, name, waypoints, start_state=None):
         0.01,
         0.0,
     )
+    retime_start = start_state if start_state is not None else planner.get_current_state()
+    if fraction >= 0.999:
+        trajectory = retime_trajectory(planner, retime_start, trajectory)
+    point_count = trajectory_point_count(trajectory)
+    diag = {{
+        "name": name,
+        "type": "cartesian",
+        "success": bool(fraction >= 0.999 and point_count > 0),
+        "fraction": float(fraction),
+        "points": point_count,
+        "waypoints": [pose_to_dict(pose) for pose in waypoints],
+        "final_requested_pose": pose_to_dict(waypoints[-1]),
+    }}
+    diag.update(trajectory_joint_summary(trajectory))
+    print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(diag, sort_keys=True))
     if fraction < 0.999:
         raise RuntimeError("Cartesian path %s incomplete: fraction=%.6f" % (name, fraction))
-    retime_start = start_state if start_state is not None else planner.get_current_state()
-    trajectory = retime_trajectory(planner, retime_start, trajectory)
-    point_count = trajectory_point_count(trajectory)
     if point_count == 0:
         raise RuntimeError("Cartesian path %s produced no trajectory points" % name)
     final_state = start_state_from_trajectory(trajectory)
-    print("CARTESIAN_PLAN_JSON " + json.dumps({{
-        "name": name,
-        "fraction": float(fraction),
-        "points": point_count,
-        "waypoints": [pose_to_dict(pose) for pose in waypoints],
-        "final_pose": pose_to_dict(waypoints[-1]),
-    }}, sort_keys=True))
-    return trajectory, {{
-        "name": name,
-        "type": "cartesian",
-        "fraction": float(fraction),
-        "points": point_count,
-        "waypoints": [pose_to_dict(pose) for pose in waypoints],
-        "final_pose": pose_to_dict(waypoints[-1]),
-    }}, final_state
+    return trajectory, diag, final_state
 
 
-def plan_target(planner, name, xyz, quat):
+def plan_target(planner, name, xyz, quat, start_state=None):
     assert_workspace(name, xyz)
+    if start_state is not None:
+        planner.set_start_state(start_state)
     planner.clear_pose_targets()
-    planner.set_pose_target(pose_msg(xyz, quat))
+    requested_pose = pose_msg(xyz, quat)
+    planner.set_pose_target(requested_pose)
     trajectory, summary = summarize_plan(name, planner.plan())
+    summary["final_requested_pose"] = pose_to_dict(requested_pose)
+    print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(summary, sort_keys=True))
     state = start_state_from_trajectory(trajectory)
     if state is not None:
         planner.set_start_state(state)
@@ -508,12 +584,10 @@ transit_z = max(float(CONFIG["transit_z"]), current_xyz[2], source_base[2] + flo
 hover_z = max(transit_z, source_base[2] + float(CONFIG["hover_height"]))
 grasp_z = source_base[2] + float(CONFIG["grasp_z_offset"])
 
-raised_current_pose = pose_msg([current_xyz[0], current_xyz[1], transit_z], DOWNWARD_QUAT)
 source_hover_pose = pose_msg([source_base[0], source_base[1], hover_z], DOWNWARD_QUAT)
 source_grasp_pose = pose_msg([source_base[0], source_base[1], grasp_z], DOWNWARD_QUAT)
 
 for name, pose in [
-    ("raised_current", raised_current_pose),
     ("source_hover", source_hover_pose),
     ("source_grasp", source_grasp_pose),
     ("source_hover_after_grasp", source_hover_pose),
@@ -527,26 +601,48 @@ planner.set_start_state_to_current_state()
 
 print("START_POSE_JSON " + json.dumps(pose_to_dict(pose_from_current(current_pose)), sort_keys=True))
 print("DOWNWARD_TOOL_QUATERNION_XYZW " + json.dumps(DOWNWARD_QUAT))
+planner_diagnostics = {{
+    "planning_frame": planner.get_planning_frame(),
+    "pose_reference_frame": planner.get_pose_reference_frame(),
+    "end_effector_link": planner.get_end_effector_link(),
+    "planner_current_pose": pose_to_dict(planner.get_current_pose().pose),
+    "current_joint_values": [float(x) for x in planner.get_current_joint_values()],
+    "current_robot_state_satisfies_bounds": check_current_state_validity(planner),
+    "source_hover_pose": pose_to_dict(source_hover_pose),
+    "source_grasp_pose": pose_to_dict(source_grasp_pose),
+}}
+print("PLANNER_DIAGNOSTICS_JSON " + json.dumps(planner_diagnostics, sort_keys=True))
 
 plans = {{}}
 summaries = []
 
-approach_trajectory, approach_summary, approach_final_state = plan_cartesian(
+transit_trajectory, transit_summary = plan_target(
     planner,
-    "approach",
-    [raised_current_pose, source_hover_pose, source_grasp_pose],
+    "transit_to_source_hover",
+    [source_hover_pose.position.x, source_hover_pose.position.y, source_hover_pose.position.z],
+    DOWNWARD_QUAT,
 )
-plans["approach"] = approach_trajectory
-summaries.append(approach_summary)
+transit_final_state = start_state_from_trajectory(transit_trajectory)
+plans["transit_to_source_hover"] = transit_trajectory
+summaries.append(transit_summary)
 
-lift_trajectory, lift_summary, lift_final_state = plan_cartesian(
+source_descend_trajectory, source_descend_summary, source_descend_final_state = plan_cartesian(
     planner,
-    "lift",
-    [source_hover_pose],
-    approach_final_state,
+    "source_descend",
+    [source_grasp_pose],
+    transit_final_state,
 )
-plans["lift"] = lift_trajectory
-summaries.append(lift_summary)
+plans["source_descend"] = source_descend_trajectory
+summaries.append(source_descend_summary)
+
+source_lift_trajectory, source_lift_summary, source_lift_final_state = plan_cartesian(
+    planner,
+    "source_lift",
+    [source_hover_pose],
+    source_descend_final_state,
+)
+plans["source_lift"] = source_lift_trajectory
+summaries.append(source_lift_summary)
 
 transport_name = None
 destination_descend_name = None
@@ -565,12 +661,12 @@ if CONFIG["task"] == "place":
     ]:
         assert_workspace(name, [pose.position.x, pose.position.y, pose.position.z])
 
-    planner.set_start_state(lift_final_state)
     transport_trajectory, transport_summary = plan_target(
         planner,
         "transport_to_destination_hover",
         [destination_hover_pose.position.x, destination_hover_pose.position.y, destination_hover_pose.position.z],
         DOWNWARD_QUAT,
+        source_lift_final_state,
     )
     transport_final_state = start_state_from_trajectory(transport_trajectory)
     plans["transport_to_destination_hover"] = transport_trajectory
@@ -613,7 +709,8 @@ else:
     if not result.get("success"):
         raise RuntimeError("open_gripper failed")
 
-    execute_trajectory(planner, "approach", plans["approach"])
+    execute_trajectory(planner, "transit_to_source_hover", plans["transit_to_source_hover"])
+    execute_trajectory(planner, "source_descend", plans["source_descend"])
 
     print("EXEC_STEP close_gripper")
     result = env.set_gripper(close_width)
@@ -621,7 +718,7 @@ else:
     if not result.get("success"):
         raise RuntimeError("close_gripper failed")
 
-    execute_trajectory(planner, "lift", plans["lift"])
+    execute_trajectory(planner, "source_lift", plans["source_lift"])
 
     if CONFIG["task"] == "place":
         execute_trajectory(planner, "transport_to_destination_hover", plans["transport_to_destination_hover"])
@@ -689,14 +786,16 @@ def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float) 
         if state.get("stderr"):
             print(state["stderr"], end="", file=sys.stderr)
         status = str(state.get("status", "unknown"))
-    print("FINAL_STATUS " + status)
     if status != "completed":
         final = http_json("GET", base + "/code/result")
         result = final.get("result") or {}
-        if status == "idle" and result.get("status") == "completed":
+        result_status = str(result.get("status") or status)
+        print("FINAL_STATUS " + result_status)
+        if status == "idle" and result_status == "completed":
             return 0
         print("FINAL_RESULT " + json.dumps(final, indent=2, sort_keys=True))
         return 1
+    print("FINAL_STATUS " + status)
     return 0
 
 
