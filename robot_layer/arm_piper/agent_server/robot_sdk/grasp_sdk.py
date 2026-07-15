@@ -21,8 +21,10 @@ from sensor_msgs.msg import CameraInfo, Image as RosImage
 
 try:
     from robot_sdk.config import get_config
+    from robot_sdk.service_selection import select_service_url
 except ImportError:
     from config import get_config
+    from service_selection import select_service_url
 
 
 class GraspSDK:
@@ -73,10 +75,25 @@ class GraspSDK:
 
         # --- HTTP urls ---
         # 兼容历史配置：有些环境只填了 "...:8018/detect"（应为 "...:8018/grasp/detect"）
-        raw_grasp_url = grasp_url or g.get("url", "http://localhost:8015/grasp/detect")
+        configured_grasp_url = self._normalize_grasp_url(g.get("url", "http://localhost:8015/grasp/detect"))
+        selected_grasp_url, self._grasp_backend, self._grasp_health = select_service_url(
+            service_name="GraspSDK",
+            explicit_url=grasp_url,
+            env_var="ABOT_GRASP_URL",
+            configured_url=configured_grasp_url,
+            local_url="http://127.0.0.1:8015/grasp/detect",
+        )
+        raw_grasp_url = selected_grasp_url
         self._grasp_url = self._normalize_grasp_url(raw_grasp_url)
 
-        self._yolo_url = y.get("url", "http://localhost:8017/detect")
+        selected_yolo_url, self._yolo_backend, self._yolo_health = select_service_url(
+            service_name="GraspSDK YOLO",
+            explicit_url=None,
+            env_var="ABOT_YOLO_URL",
+            configured_url=y.get("url", "http://localhost:8017/detect"),
+            local_url="http://127.0.0.1:8013/detect",
+        )
+        self._yolo_url = selected_yolo_url
 
         # --- thresholds (仅 detect_env 使用；grasp/detect 本身的阈值在 README 中未要求) ---
         self._conf_thres = conf_thres if conf_thres is not None else y.get("conf_thres", 0.5)

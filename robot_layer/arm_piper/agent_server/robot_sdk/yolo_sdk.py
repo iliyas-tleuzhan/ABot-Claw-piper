@@ -32,8 +32,10 @@ from sensor_msgs.msg import CameraInfo, Image as RosImage
 
 try:
     from robot_sdk.config import get_config
+    from robot_sdk.service_selection import select_service_url
 except ImportError:
     from config import get_config
+    from service_selection import select_service_url
 
 
 class YoloSDK:
@@ -78,7 +80,14 @@ class YoloSDK:
         ros_cfg = cfg.get("ros", {})
         yolo_cfg = cfg.get("yolo", {})
 
-        self._yolo_url = yolo_url or yolo_cfg.get("url", "http://localhost:8017/detect")
+        selected_yolo_url, self._yolo_backend, self._yolo_health = select_service_url(
+            service_name="YoloSDK",
+            explicit_url=yolo_url,
+            env_var="ABOT_YOLO_URL",
+            configured_url=yolo_cfg.get("url", "http://localhost:8017/detect"),
+            local_url="http://127.0.0.1:8013/detect",
+        )
+        self._yolo_url = selected_yolo_url
         self._conf_thres = conf_thres if conf_thres is not None else yolo_cfg.get("conf_thres", 0.5)
         self._iou_thres = iou_thres if iou_thres is not None else yolo_cfg.get("iou_thres", 0.45)
 

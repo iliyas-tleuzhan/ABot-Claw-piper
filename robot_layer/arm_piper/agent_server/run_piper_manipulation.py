@@ -43,6 +43,12 @@ def build_robot_code(args: argparse.Namespace) -> str:
         "destination": args.destination,
         "plan_only": args.plan_only,
         "perception_only": args.perception_only,
+        "destination_perception_only": args.destination_perception_only,
+        "source_provider": args.source_provider,
+        "source_width": args.source_width,
+        "source_xyz": [args.source_x, args.source_y, args.source_z],
+        "aruco_frame": args.aruco_frame,
+        "aruco_offset_xyz": [args.aruco_offset_x, args.aruco_offset_y, args.aruco_offset_z],
         "top_k": args.top_k,
         "transit_z": args.transit_z,
         "hover_height": args.hover_height,
@@ -64,6 +70,7 @@ import time
 
 import cv2
 import numpy as np
+import rospy
 from geometry_msgs.msg import Pose
 from moveit_commander import MoveGroupCommander
 from moveit_msgs.msg import RobotState
@@ -228,24 +235,6 @@ def execute_trajectory(planner, name, trajectory):
         raise RuntimeError("Execution failed at " + name)
 
 
-def select_source_grasp(source):
-    results = grasp.get_grasp_pose(source, top_k=CONFIG["top_k"])
-    instances = [r for r in results if r.get("grasps")]
-    if not instances:
-        raise RuntimeError("No grasp returned for source " + source)
-    for inst in instances:
-        for candidate in inst.get("grasps", []):
-            width = float(candidate.get("width", 0.0))
-            if 0.0 < width <= float(env.GRIPPER_MAX) + 1e-6:
-                source_camera = finite_vec("source.translation_camera", candidate.get("translation_camera"), 3)
-                source_base = finite_vec("source.translation_base", candidate.get("translation_base"), 3)
-                return inst, candidate, source_camera, source_base
-    raise RuntimeError(
-        "No source grasp with valid width 0.0 < width <= %.4f m for %s"
-        % (float(env.GRIPPER_MAX), source)
-    )
-
-
 def depth_to_m(depth_value):
     value = float(depth_value)
     if value <= 0.0:
@@ -257,6 +246,122 @@ def deproject(u, v, depth_m, K):
     fx, fy = float(K[0, 0]), float(K[1, 1])
     cx, cy = float(K[0, 2]), float(K[1, 2])
     return [(float(u) - cx) * depth_m / fx, (float(v) - cy) * depth_m / fy, depth_m]
+
+
+def transform_point(target_frame, source_frame, point_xyz):
+    if grasp._tf_buffer is None:
+        raise RuntimeError("TF buffer is not initialized")
+    tf = grasp._tf_buffer.lookup_transform(
+        target_frame,
+        source_frame,
+        rospy.Time(0),
+        rospy.Duration(1.0),
+    )
+    t = tf.transform.translation
+    q = tf.transform.rotation
+    rot = grasp._quat_to_rot_xyzw([q.x, q.y, q.z, q.w])
+    point = np.asarray(point_xyz, dtype=float).reshape(3)
+    return [float(x) for x in (rot.dot(point) + np.array([t.x, t.y, t.z], dtype=float)).tolist()]
+
+
+def base_to_camera_point(base_xyz):
+    return transform_point(grasp._camera_frame_id, grasp._base_frame_id, base_xyz)
+
+
+def normalize_source(provider, label, camera_xyz, base_xyz, width_m, confidence, metadata):
+    camera = finite_vec("source.camera_xyz", camera_xyz, 3)
+    base = finite_vec("source.base_xyz", base_xyz, 3)
+    width = float(width_m)
+    if not (0.0 < width <= float(env.GRIPPER_MAX) + 1e-6):
+        raise RuntimeError(
+            "Invalid source width %.4f m; expected 0.0 < width <= %.4f m"
+            % (width, float(env.GRIPPER_MAX))
+        )
+    assert_workspace("source_base", base)
+    return {{
+        "provider": provider,
+        "label": label,
+        "camera_xyz": camera,
+        "base_xyz": base,
+        "width_m": width,
+        "confidence": float(confidence),
+        "metadata": metadata or {{}},
+    }}
+
+
+def source_from_perception(source):
+    results = grasp.get_grasp_pose(source, top_k=CONFIG["top_k"])
+    instances = [r for r in results if r.get("grasps")]
+    if not instances:
+        raise RuntimeError("No grasp returned for source " + source)
+    for inst in instances:
+        for candidate in inst.get("grasps", []):
+            width = float(candidate.get("width", 0.0))
+            if 0.0 < width <= float(env.GRIPPER_MAX) + 1e-6:
+                return normalize_source(
+                    "perception",
+                    inst.get("label") or source,
+                    candidate.get("translation_camera"),
+                    candidate.get("translation_base"),
+                    width,
+                    inst.get("confidence", 0.0),
+                    {{"instance": inst, "selected_grasp": candidate}},
+                )
+    raise RuntimeError(
+        "No source grasp with valid width 0.0 < width <= %.4f m for %s"
+        % (float(env.GRIPPER_MAX), source)
+    )
+
+
+def source_from_manual():
+    xyz = CONFIG["source_xyz"]
+    if any(value is None for value in xyz):
+        raise RuntimeError("Manual source provider requires --source-x --source-y --source-z")
+    if CONFIG["source_width"] is None:
+        raise RuntimeError("Manual source provider requires --source-width")
+    base_xyz = finite_vec("manual_source.base_xyz", xyz, 3)
+    camera_xyz = base_to_camera_point(base_xyz)
+    return normalize_source(
+        "manual",
+        CONFIG["source"] or "manual-source",
+        camera_xyz,
+        base_xyz,
+        CONFIG["source_width"],
+        1.0,
+        {{"coordinate_frame": grasp._base_frame_id}},
+    )
+
+
+def source_from_aruco():
+    if CONFIG["source_width"] is None:
+        raise RuntimeError("ArUco source provider requires --source-width")
+    marker_frame = CONFIG["aruco_frame"]
+    offset = finite_vec("aruco_offset_xyz", CONFIG["aruco_offset_xyz"], 3)
+    try:
+        base_xyz = transform_point(grasp._base_frame_id, marker_frame, offset)
+    except Exception as exc:
+        raise RuntimeError("ArUco source provider failed to read TF for %s: %s" % (marker_frame, exc))
+    camera_xyz = base_to_camera_point(base_xyz)
+    return normalize_source(
+        "aruco",
+        CONFIG["source"] or marker_frame,
+        camera_xyz,
+        base_xyz,
+        CONFIG["source_width"],
+        1.0,
+        {{"aruco_frame": marker_frame, "marker_to_object_offset_xyz": offset}},
+    )
+
+
+def select_source():
+    provider = CONFIG["source_provider"]
+    if provider == "perception":
+        return source_from_perception(CONFIG["source"])
+    if provider == "manual":
+        return source_from_manual()
+    if provider == "aruco":
+        return source_from_aruco()
+    raise RuntimeError("Unknown source provider: " + repr(provider))
 
 
 class DestinationDetector:
@@ -354,13 +459,26 @@ print("MOTION_PROFILE_JSON " + json.dumps({{
 if not hasattr(env, "_ensure_piper_enabled"):
     raise RuntimeError("PiperRobotEnv missing enable preflight helper")
 
+if CONFIG["destination_perception_only"]:
+    if not CONFIG["destination"]:
+        raise RuntimeError("--destination-perception-only requires --destination")
+    destination = detect_destination(CONFIG["destination"])
+    print("DESTINATION_DETECTION_JSON " + json.dumps(destination, sort_keys=True))
+    print("destination_pixel " + json.dumps(destination["pixel"]))
+    print("destination_camera_xyz " + json.dumps(destination["camera_xyz"]))
+    print("destination_base_xyz " + json.dumps(destination["base_xyz"]))
+    print("DESTINATION_PERCEPTION_ONLY_COMPLETE no planning or robot movement commanded")
+    raise SystemExit(0)
+
 current_pose = env.get_robot_end_pose()
 if current_pose is None:
     raise RuntimeError("No current end-effector pose from /end_pose")
 current_xyz = finite_vec("current_end_effector.position", current_pose.get("position"), 3)
 
-inst, best, source_camera, source_base = select_source_grasp(CONFIG["source"])
-width = float(best.get("width", 0.0))
+source_detection = select_source()
+source_camera = source_detection["camera_xyz"]
+source_base = source_detection["base_xyz"]
+width = float(source_detection["width_m"])
 open_width = float(env.GRIPPER_MAX)
 close_width = max(float(env.GRIPPER_MIN), min(float(env.GRIPPER_MAX), width * 0.35))
 
@@ -371,13 +489,9 @@ if CONFIG["destination"]:
     destination_base = finite_vec("destination.base_xyz", destination["base_xyz"], 3)
 
 print("SOURCE_DETECTION_JSON " + json.dumps({{
-    "label": inst.get("label"),
-    "confidence": inst.get("confidence"),
-    "xyxy": inst.get("xyxy"),
-    "width_m": width,
+    **source_detection,
     "source_camera_xyz": source_camera,
     "source_base_xyz": source_base,
-    "selected_grasp": best,
 }}, sort_keys=True))
 print("source_camera_xyz " + json.dumps(source_camera))
 print("source_base_xyz " + json.dumps(source_base))
@@ -591,12 +705,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-url", default="http://127.0.0.1:8888")
     parser.add_argument("--holder", default="piper-manipulation")
     parser.add_argument("--task", choices=("pick", "place"), required=True)
-    parser.add_argument("--source", required=True)
+    parser.add_argument("--source")
     parser.add_argument("--destination")
+    parser.add_argument(
+        "--source-provider",
+        choices=("perception", "aruco", "manual"),
+        default="perception",
+    )
+    parser.add_argument("--source-width", type=float)
+    parser.add_argument("--source-x", type=float)
+    parser.add_argument("--source-y", type=float)
+    parser.add_argument("--source-z", type=float)
+    parser.add_argument("--aruco-frame", default="aruco_marker_frame")
+    parser.add_argument("--aruco-offset-x", type=float, default=0.0)
+    parser.add_argument("--aruco-offset-y", type=float, default=0.0)
+    parser.add_argument("--aruco-offset-z", type=float, default=0.0)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan-only", action="store_true")
     mode.add_argument("--execute", action="store_true")
     mode.add_argument("--perception-only", action="store_true")
+    mode.add_argument("--destination-perception-only", action="store_true")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--transit-z", type=float, default=0.32)
     parser.add_argument("--hover-height", type=float, default=0.10)
@@ -612,6 +740,25 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.task == "place" and not args.destination:
         parser.error("--task place requires --destination")
+    if not args.destination_perception_only and not args.source:
+        parser.error("--source is required unless --destination-perception-only is used")
+    if args.source_provider == "manual" and not args.destination_perception_only:
+        missing = [
+            name
+            for name, value in (
+                ("--source-x", args.source_x),
+                ("--source-y", args.source_y),
+                ("--source-z", args.source_z),
+                ("--source-width", args.source_width),
+            )
+            if value is None
+        ]
+        if missing:
+            parser.error("--source-provider manual requires " + " ".join(missing))
+    if args.source_provider == "aruco" and not args.destination_perception_only and args.source_width is None:
+        parser.error("--source-provider aruco requires --source-width")
+    if args.source_width is not None and args.source_width <= 0.0:
+        parser.error("--source-width must be greater than 0")
     if args.execute:
         args.plan_only = False
     return args
