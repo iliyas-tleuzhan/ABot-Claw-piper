@@ -104,6 +104,24 @@ def pose_msg(xyz, quat):
     return pose
 
 
+def pose_to_dict(pose):
+    return {{
+        "position": [pose.position.x, pose.position.y, pose.position.z],
+        "orientation_quat": [
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ],
+    }}
+
+
+def pose_from_current(current):
+    xyz = finite_vec("current_end_effector.position", current.get("position"), 3)
+    quat = finite_vec("current_end_effector.orientation_quat", current.get("orientation_quat"), 4)
+    return pose_msg(xyz, quat)
+
+
 def start_state_from_trajectory(trajectory):
     points = getattr(getattr(trajectory, "joint_trajectory", None), "points", [])
     joint_names = list(getattr(getattr(trajectory, "joint_trajectory", None), "joint_names", []))
@@ -113,6 +131,10 @@ def start_state_from_trajectory(trajectory):
     state.joint_state.name = joint_names
     state.joint_state.position = list(points[-1].positions)
     return state
+
+
+def trajectory_point_count(trajectory):
+    return len(getattr(getattr(trajectory, "joint_trajectory", None), "points", []))
 
 
 def summarize_plan(name, result):
@@ -137,6 +159,54 @@ def summarize_plan(name, result):
     return trajectory, {{"name": name, "success": success, "points": count, "planning_time": planning_time, "error": error_code}}
 
 
+def retime_trajectory(planner, start_state, trajectory):
+    return planner.retime_trajectory(
+        start_state,
+        trajectory,
+        velocity_scaling_factor=float(CONFIG["velocity_scaling"]),
+        acceleration_scaling_factor=float(CONFIG["acceleration_scaling"]),
+    )
+
+
+def plan_cartesian(planner, name, waypoints, start_state=None):
+    if start_state is not None:
+        planner.set_start_state(start_state)
+    for index, waypoint in enumerate(waypoints):
+        assert_workspace("%s waypoint %d" % (name, index), [
+            waypoint.position.x,
+            waypoint.position.y,
+            waypoint.position.z,
+        ])
+    trajectory, fraction = planner.compute_cartesian_path(
+        waypoints,
+        0.01,
+        0.0,
+    )
+    if fraction < 0.999:
+        raise RuntimeError("Cartesian path %s incomplete: fraction=%.6f" % (name, fraction))
+    retime_start = start_state if start_state is not None else planner.get_current_state()
+    trajectory = retime_trajectory(planner, retime_start, trajectory)
+    point_count = trajectory_point_count(trajectory)
+    if point_count == 0:
+        raise RuntimeError("Cartesian path %s produced no trajectory points" % name)
+    final_state = start_state_from_trajectory(trajectory)
+    print("CARTESIAN_PLAN_JSON " + json.dumps({{
+        "name": name,
+        "fraction": float(fraction),
+        "points": point_count,
+        "waypoints": [pose_to_dict(pose) for pose in waypoints],
+        "final_pose": pose_to_dict(waypoints[-1]),
+    }}, sort_keys=True))
+    return trajectory, {{
+        "name": name,
+        "type": "cartesian",
+        "fraction": float(fraction),
+        "points": point_count,
+        "waypoints": [pose_to_dict(pose) for pose in waypoints],
+        "final_pose": pose_to_dict(waypoints[-1]),
+    }}, final_state
+
+
 def plan_target(planner, name, xyz, quat):
     assert_workspace(name, xyz)
     planner.clear_pose_targets()
@@ -151,9 +221,9 @@ def plan_target(planner, name, xyz, quat):
 def execute_trajectory(planner, name, trajectory):
     print("EXEC_STEP " + name)
     ok = bool(planner.execute(trajectory, wait=True))
+    print("EXEC_RESULT %s %s" % (name, ok))
     planner.stop()
     planner.clear_pose_targets()
-    print("EXEC_RESULT %s %s" % (name, ok))
     if not ok:
         raise RuntimeError("Execution failed at " + name)
 
@@ -166,11 +236,14 @@ def select_source_grasp(source):
     for inst in instances:
         for candidate in inst.get("grasps", []):
             width = float(candidate.get("width", 0.0))
-            if width <= 0.0 or width <= float(env.GRIPPER_MAX) + 1e-6:
+            if 0.0 < width <= float(env.GRIPPER_MAX) + 1e-6:
                 source_camera = finite_vec("source.translation_camera", candidate.get("translation_camera"), 3)
                 source_base = finite_vec("source.translation_base", candidate.get("translation_base"), 3)
                 return inst, candidate, source_camera, source_base
-    raise RuntimeError("No source grasp compatible with gripper max %.4f m" % float(env.GRIPPER_MAX))
+    raise RuntimeError(
+        "No source grasp with valid width 0.0 < width <= %.4f m for %s"
+        % (float(env.GRIPPER_MAX), source)
+    )
 
 
 def depth_to_m(depth_value):
@@ -321,39 +394,99 @@ transit_z = max(float(CONFIG["transit_z"]), current_xyz[2], source_base[2] + flo
 hover_z = max(transit_z, source_base[2] + float(CONFIG["hover_height"]))
 grasp_z = source_base[2] + float(CONFIG["grasp_z_offset"])
 
-targets = [
-    ("rise_to_transit", [current_xyz[0], current_xyz[1], transit_z], DOWNWARD_QUAT),
-    ("hover_source", [source_base[0], source_base[1], hover_z], DOWNWARD_QUAT),
-    ("descend_source", [source_base[0], source_base[1], grasp_z], DOWNWARD_QUAT),
-    ("rise_with_source", [source_base[0], source_base[1], hover_z], DOWNWARD_QUAT),
-]
-if CONFIG["task"] == "place":
-    if destination_base is None:
-        raise RuntimeError("Place task requires a detected destination")
-    dest_hover_z = max(transit_z, destination_base[2] + float(CONFIG["hover_height"]))
-    place_z = destination_base[2] + float(CONFIG["place_z_offset"])
-    targets.extend([
-        ("hover_destination", [destination_base[0], destination_base[1], dest_hover_z], DOWNWARD_QUAT),
-        ("descend_destination", [destination_base[0], destination_base[1], place_z], DOWNWARD_QUAT),
-        ("rise_after_release", [destination_base[0], destination_base[1], dest_hover_z], DOWNWARD_QUAT),
-    ])
+raised_current_pose = pose_msg([current_xyz[0], current_xyz[1], transit_z], DOWNWARD_QUAT)
+source_hover_pose = pose_msg([source_base[0], source_base[1], hover_z], DOWNWARD_QUAT)
+source_grasp_pose = pose_msg([source_base[0], source_base[1], grasp_z], DOWNWARD_QUAT)
 
-for name, xyz, _quat in targets:
-    assert_workspace(name, xyz)
+for name, pose in [
+    ("raised_current", raised_current_pose),
+    ("source_hover", source_hover_pose),
+    ("source_grasp", source_grasp_pose),
+    ("source_hover_after_grasp", source_hover_pose),
+]:
+    assert_workspace(name, [pose.position.x, pose.position.y, pose.position.z])
 
 planner = MoveGroupCommander("arm")
 planner.set_max_velocity_scaling_factor(float(CONFIG["velocity_scaling"]))
 planner.set_max_acceleration_scaling_factor(float(CONFIG["acceleration_scaling"]))
 planner.set_start_state_to_current_state()
 
-plans = []
-summaries = []
-for name, xyz, quat in targets:
-    trajectory, summary = plan_target(planner, name, xyz, quat)
-    plans.append((name, trajectory))
-    summaries.append(summary)
-print("MOVEIT_PLAN_JSON " + json.dumps(summaries, sort_keys=True))
+print("START_POSE_JSON " + json.dumps(pose_to_dict(pose_from_current(current_pose)), sort_keys=True))
 print("DOWNWARD_TOOL_QUATERNION_XYZW " + json.dumps(DOWNWARD_QUAT))
+
+plans = {{}}
+summaries = []
+
+approach_trajectory, approach_summary, approach_final_state = plan_cartesian(
+    planner,
+    "approach",
+    [raised_current_pose, source_hover_pose, source_grasp_pose],
+)
+plans["approach"] = approach_trajectory
+summaries.append(approach_summary)
+
+lift_trajectory, lift_summary, lift_final_state = plan_cartesian(
+    planner,
+    "lift",
+    [source_hover_pose],
+    approach_final_state,
+)
+plans["lift"] = lift_trajectory
+summaries.append(lift_summary)
+
+transport_name = None
+destination_descend_name = None
+destination_rise_name = None
+if CONFIG["task"] == "place":
+    if destination_base is None:
+        raise RuntimeError("Place task requires a detected destination")
+    dest_hover_z = max(transit_z, destination_base[2] + float(CONFIG["hover_height"]))
+    place_z = destination_base[2] + float(CONFIG["place_z_offset"])
+    destination_hover_pose = pose_msg([destination_base[0], destination_base[1], dest_hover_z], DOWNWARD_QUAT)
+    destination_place_pose = pose_msg([destination_base[0], destination_base[1], place_z], DOWNWARD_QUAT)
+    for name, pose in [
+        ("destination_hover", destination_hover_pose),
+        ("destination_place", destination_place_pose),
+        ("destination_hover_after_release", destination_hover_pose),
+    ]:
+        assert_workspace(name, [pose.position.x, pose.position.y, pose.position.z])
+
+    planner.set_start_state(lift_final_state)
+    transport_trajectory, transport_summary = plan_target(
+        planner,
+        "transport_to_destination_hover",
+        [destination_hover_pose.position.x, destination_hover_pose.position.y, destination_hover_pose.position.z],
+        DOWNWARD_QUAT,
+    )
+    transport_final_state = start_state_from_trajectory(transport_trajectory)
+    plans["transport_to_destination_hover"] = transport_trajectory
+    summaries.append({{
+        "name": "transport_to_destination_hover",
+        "type": "planned_pose_target",
+        "points": trajectory_point_count(transport_trajectory),
+        "final_pose": pose_to_dict(destination_hover_pose),
+        **transport_summary,
+    }})
+
+    destination_descend_trajectory, destination_descend_summary, destination_descend_state = plan_cartesian(
+        planner,
+        "destination_descend",
+        [destination_place_pose],
+        transport_final_state,
+    )
+    plans["destination_descend"] = destination_descend_trajectory
+    summaries.append(destination_descend_summary)
+
+    destination_rise_trajectory, destination_rise_summary, _destination_rise_state = plan_cartesian(
+        planner,
+        "destination_rise",
+        [destination_hover_pose],
+        destination_descend_state,
+    )
+    plans["destination_rise"] = destination_rise_trajectory
+    summaries.append(destination_rise_summary)
+
+print("MOVEIT_PLAN_JSON " + json.dumps(summaries, sort_keys=True))
 
 if CONFIG["plan_only"]:
     print("PLAN_ONLY_COMPLETE no robot movement commanded")
@@ -366,8 +499,7 @@ else:
     if not result.get("success"):
         raise RuntimeError("open_gripper failed")
 
-    for name, trajectory in plans[:3]:
-        execute_trajectory(planner, name, trajectory)
+    execute_trajectory(planner, "approach", plans["approach"])
 
     print("EXEC_STEP close_gripper")
     result = env.set_gripper(close_width)
@@ -375,17 +507,17 @@ else:
     if not result.get("success"):
         raise RuntimeError("close_gripper failed")
 
-    execute_trajectory(planner, "rise_with_source", plans[3][1])
+    execute_trajectory(planner, "lift", plans["lift"])
 
     if CONFIG["task"] == "place":
-        for name, trajectory in plans[4:6]:
-            execute_trajectory(planner, name, trajectory)
+        execute_trajectory(planner, "transport_to_destination_hover", plans["transport_to_destination_hover"])
+        execute_trajectory(planner, "destination_descend", plans["destination_descend"])
         print("EXEC_STEP open_gripper_release")
         result = env.set_gripper(open_width)
         print("EXEC_RESULT open_gripper_release %s" % result)
         if not result.get("success"):
             raise RuntimeError("open_gripper_release failed")
-        execute_trajectory(planner, "rise_after_release", plans[-1][1])
+        execute_trajectory(planner, "destination_rise", plans["destination_rise"])
         print("VISUAL_VERIFICATION_JSON " + json.dumps(visual_verify(source_base, destination_base), sort_keys=True))
 
     print("EXECUTION_COMPLETE")
