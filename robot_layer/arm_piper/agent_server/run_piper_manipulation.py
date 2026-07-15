@@ -235,29 +235,28 @@ def compute_top_down_tcp_orientation(closing_target_axis=None):
 
 
 def top_down_orientation_candidates(current_tcp_pose):
-    rot = quat_to_rot_xyzw([
-        current_tcp_pose.orientation.x,
-        current_tcp_pose.orientation.y,
-        current_tcp_pose.orientation.z,
-        current_tcp_pose.orientation.w,
-    ])
-    current_closing = rot.dot(unit_vec("tcp_local_closing_axis", TCP_LOCAL_CLOSING_AXIS))
-    projected = np.array([current_closing[0], current_closing[1], 0.0], dtype=float)
-    if float(np.linalg.norm(projected)) > 1e-6:
-        base_yaw = math.atan2(float(projected[1]), float(projected[0]))
-    else:
-        base = unit_vec("target_closing_axis", TARGET_CLOSING_AXIS)
-        base_yaw = math.atan2(float(base[1]), float(base[0]))
-    offsets = [0.0, math.pi / 4.0, -math.pi / 4.0, math.pi / 2.0, -math.pi / 2.0, math.pi, 3.0 * math.pi / 4.0, -3.0 * math.pi / 4.0]
-    seen = set()
     candidates = []
-    tilt_degrees = [0.0, 3.0, -3.0, 5.0, -5.0]
-    for offset in offsets:
-        yaw = math.atan2(math.sin(base_yaw + offset), math.cos(base_yaw + offset))
-        key = round(yaw, 6)
-        if key in seen:
-            continue
-        seen.add(key)
+    exact_yaw_degrees = [0.0, 45.0, 90.0, 135.0, 180.0, -45.0, -90.0, -135.0]
+    tilt_degrees = [5.0, 10.0, 15.0, 20.0]
+
+    for yaw_deg in exact_yaw_degrees:
+        yaw = math.radians(yaw_deg)
+        closing = [math.cos(yaw), math.sin(yaw), 0.0]
+        quat, approach_axis, closing_axis, angle = compute_top_down_tcp_orientation(closing)
+        candidates.append({{
+            "phase": "exact_top_down",
+            "yaw_rad": float(yaw),
+            "yaw_deg": float(yaw_deg),
+            "tilt_deg": 0.0,
+            "closing_axis": [float(x) for x in closing],
+            "quat": quat,
+            "approach_axis": approach_axis,
+            "target_closing_axis": closing_axis,
+            "approach_angle_deg": angle,
+        }})
+
+    for yaw_deg in [0.0]:
+        yaw = math.radians(yaw_deg)
         closing = [math.cos(yaw), math.sin(yaw), 0.0]
         closing_vec = unit_vec("candidate_closing_axis", closing)
         lateral_vec = np.cross(closing_vec, np.array([0.0, 0.0, -1.0], dtype=float))
@@ -271,7 +270,9 @@ def top_down_orientation_candidates(current_tcp_pose):
             adjusted_closing /= np.linalg.norm(adjusted_closing)
             quat, approach_axis, closing_axis, angle = compute_tcp_orientation(approach, adjusted_closing)
             candidates.append({{
+                "phase": "tilted",
                 "yaw_rad": float(yaw),
+                "yaw_deg": float(yaw_deg),
                 "tilt_deg": float(tilt_deg),
                 "closing_axis": [float(x) for x in closing],
                 "quat": quat,
@@ -470,9 +471,6 @@ def ik_seed_states(planner):
         [0.20, 0.0, 0.0, 0.0, 0.0, 0.0],
         [-0.20, 0.0, 0.0, 0.0, 0.0, 0.0],
         [0.0, 0.10, -0.10, 0.0, 0.0, 0.0],
-        [0.0, -0.10, 0.10, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.35],
-        [0.0, 0.0, 0.0, 0.0, 0.0, -0.35],
     ]
     seeds = []
     for index, offset in enumerate(offsets):
@@ -494,29 +492,53 @@ def ik_seed_states(planner):
     return seeds
 
 
+def solution_joint_limit_distances(solution, active_joint_names, limits):
+    name_to_position = dict(zip(solution.joint_state.name, solution.joint_state.position))
+    distances = []
+    positions = []
+    for name in active_joint_names:
+        if name not in name_to_position:
+            continue
+        position = float(name_to_position[name])
+        positions.append(position)
+        if name in limits:
+            lower, upper = limits[name]
+            distances.append(min(position - lower, upper - position))
+    return {{
+        "joint_names": list(active_joint_names),
+        "joint_positions": positions,
+        "min_joint_limit_distance": float(min(distances)) if distances else None,
+    }}
+
+
 def check_pose_ik(planner, pose):
     try:
         rospy.wait_for_service("/compute_ik", timeout=5.0)
         service = rospy.ServiceProxy("/compute_ik", GetPositionIK)
         results = []
+        active_joint_names = list(planner.get_active_joints())
+        limits = joint_limits_from_robot_description(active_joint_names)
         for seed in ik_seed_states(planner):
             req = GetPositionIKRequest()
             req.ik_request.group_name = "arm"
             req.ik_request.ik_link_name = TCP_LINK
             req.ik_request.robot_state = seed["state"]
             req.ik_request.avoid_collisions = True
-            req.ik_request.timeout = rospy.Duration(5.0)
+            req.ik_request.timeout = rospy.Duration(2.0)
             stamped = PoseStamped()
             stamped.header.frame_id = planner.get_planning_frame()
             stamped.header.stamp = rospy.Time.now()
             stamped.pose = pose
             req.ik_request.pose_stamped = stamped
             resp = service(req)
+            success = resp.error_code.val == MoveItErrorCodes.SUCCESS
+            solution = solution_joint_limit_distances(resp.solution, active_joint_names, limits) if success else {{}}
             results.append({{
                 "seed_index": seed["index"],
                 "seed_label": seed["label"],
-                "success": resp.error_code.val == MoveItErrorCodes.SUCCESS,
+                "success": success,
                 "error": moveit_error_summary(resp.error_code),
+                **solution,
             }})
         success = any(item["success"] for item in results)
         first_error = next((item["error"] for item in results if item["success"]), None)
@@ -662,62 +684,115 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     rows = []
     hover_height = float(CONFIG["hover_height"])
     minimum_link6_transit_z = float(CONFIG["transit_z"])
-    for index, candidate in enumerate(top_down_orientation_candidates(current_tcp_pose)):
-        quat = candidate["quat"]
-        height_plan = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, candidate)
-        xyz = [source_base[0], source_base[1], height_plan["selected_tcp_hover_z"]]
-        hover_pose = pose_msg(xyz, quat)
-        assert_workspace("source_hover candidate %d" % index, xyz)
-        reachability = reachability_diagnostic(xyz, candidate, height_plan["world_link6_to_tcp_translation"])
-        print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
-        print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
-        ik_result = check_pose_ik(planner, hover_pose)
-        print("TCP_IK_CANDIDATE_JSON " + json.dumps({{
-            "index": index,
-            "yaw_rad": float(candidate["yaw_rad"]),
-            "yaw_deg": math.degrees(float(candidate["yaw_rad"])),
-            "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
-            "success": bool(ik_result.get("success")),
-            "error": ik_result.get("error"),
-            "available": bool(ik_result.get("available")),
-            "seeds": ik_result.get("seeds", []),
-        }}, sort_keys=True))
-        planner.set_start_state_to_current_state()
-        trajectory, summary = plan_target(
-            planner,
-            "transit_to_source_hover_yaw_%d" % index,
-            xyz,
-            quat,
-            raise_on_failure=False,
-        )
-        row = {{
-            "index": index,
-            "yaw_deg": math.degrees(float(candidate["yaw_rad"])),
-            "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
-            "ik_success": bool(ik_result.get("success")),
-            "ik_error": ik_result.get("error"),
-            "planner_success": bool(summary.get("success")),
-            "planner_error": summary.get("error"),
-            "trajectory_points": int(summary.get("points", 0)),
-        }}
-        rows.append(row)
-        print("TCP_CANDIDATE_RESULT_JSON " + json.dumps(row, sort_keys=True))
-        if summary.get("success") and summary.get("points", 0) > 0:
-            summary["name"] = "transit_to_source_hover"
-            summary["selected_yaw_candidate"] = candidate
-            summary["height_plan"] = height_plan
-            summary["reachability"] = reachability
-            summary["ik"] = ik_result
-            print("SELECTED_TCP_YAW_CANDIDATE_JSON " + json.dumps(candidate, sort_keys=True))
-            print("SELECTED_TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
-            return trajectory, summary, candidate, hover_pose
+    candidates = top_down_orientation_candidates(current_tcp_pose)
+    exact_candidates = [candidate for candidate in candidates if candidate["phase"] == "exact_top_down"]
+    tilted_candidates = [candidate for candidate in candidates if candidate["phase"] == "tilted"]
+    control_candidate = exact_candidates[0]
+    control_height = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, control_candidate)
+    control_xyz = [source_base[0], source_base[1], control_height["selected_tcp_hover_z"]]
+    current_orientation_quat = [
+        current_tcp_pose.orientation.x,
+        current_tcp_pose.orientation.y,
+        current_tcp_pose.orientation.z,
+        current_tcp_pose.orientation.w,
+    ]
+    current_orientation_ik = check_pose_ik(planner, pose_msg(control_xyz, current_orientation_quat))
+    exact_top_down_ik = check_pose_ik(planner, pose_msg(control_xyz, control_candidate["quat"]))
+    print("TCP_IK_CONTROL_JSON " + json.dumps({{
+        "tcp_xyz": control_xyz,
+        "current_orientation": {{
+            "success": bool(current_orientation_ik.get("success")),
+            "error": current_orientation_ik.get("error"),
+            "seeds": current_orientation_ik.get("seeds", []),
+        }},
+        "exact_top_down_yaw0": {{
+            "success": bool(exact_top_down_ik.get("success")),
+            "error": exact_top_down_ik.get("error"),
+            "seeds": exact_top_down_ik.get("seeds", []),
+        }},
+    }}, sort_keys=True))
+
+    for phase_name, phase_candidates in [("exact_top_down", exact_candidates), ("tilted", tilted_candidates)]:
+        phase_had_ik_success = False
+        if phase_name == "tilted":
+            print("TCP_TILTED_CANDIDATES_START no exact top-down candidate produced a valid planned trajectory")
+        for candidate in phase_candidates:
+            index = len(rows)
+            quat = candidate["quat"]
+            height_plan = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, candidate)
+            xyz = [source_base[0], source_base[1], height_plan["selected_tcp_hover_z"]]
+            hover_pose = pose_msg(xyz, quat)
+            assert_workspace("source_hover candidate %d" % index, xyz)
+            reachability = reachability_diagnostic(xyz, candidate, height_plan["world_link6_to_tcp_translation"])
+            print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
+            print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
+            ik_result = check_pose_ik(planner, hover_pose)
+            print("TCP_IK_CANDIDATE_JSON " + json.dumps({{
+                "index": index,
+                "phase": phase_name,
+                "yaw_rad": float(candidate["yaw_rad"]),
+                "yaw_deg": float(candidate["yaw_deg"]),
+                "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+                "success": bool(ik_result.get("success")),
+                "error": ik_result.get("error"),
+                "available": bool(ik_result.get("available")),
+                "seeds": ik_result.get("seeds", []),
+            }}, sort_keys=True))
+            phase_had_ik_success = phase_had_ik_success or bool(ik_result.get("success"))
+            summary = {{
+                "success": False,
+                "error": "SKIPPED_NO_IK",
+                "points": 0,
+            }}
+            trajectory = None
+            if ik_result.get("success"):
+                planner.set_start_state_to_current_state()
+                trajectory, summary = plan_target(
+                    planner,
+                    "transit_to_source_hover_yaw_%d" % index,
+                    xyz,
+                    quat,
+                    raise_on_failure=False,
+                )
+            row = {{
+                "index": index,
+                "phase": phase_name,
+                "yaw_deg": float(candidate["yaw_deg"]),
+                "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+                "ik_success": bool(ik_result.get("success")),
+                "ik_error": ik_result.get("error"),
+                "planner_success": bool(summary.get("success")),
+                "planner_error": summary.get("error"),
+                "trajectory_points": int(summary.get("points", 0)),
+            }}
+            rows.append(row)
+            print("TCP_CANDIDATE_RESULT_JSON " + json.dumps(row, sort_keys=True))
+            if summary.get("success") and summary.get("points", 0) > 0:
+                summary["name"] = "transit_to_source_hover"
+                summary["selected_yaw_candidate"] = candidate
+                summary["height_plan"] = height_plan
+                summary["reachability"] = reachability
+                summary["ik"] = ik_result
+                print("SELECTED_TCP_YAW_CANDIDATE_JSON " + json.dumps(candidate, sort_keys=True))
+                print("SELECTED_TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
+                return trajectory, summary, candidate, hover_pose
+        if phase_name == "exact_top_down":
+            print("TCP_EXACT_TOP_DOWN_SUMMARY_JSON " + json.dumps({{
+                "candidate_count": len([row for row in rows if row["phase"] == "exact_top_down"]),
+                "ik_success_count": sum(1 for row in rows if row["phase"] == "exact_top_down" and row["ik_success"]),
+                "planner_success_count": sum(1 for row in rows if row["phase"] == "exact_top_down" and row["planner_success"]),
+            }}, sort_keys=True))
+            if any(row["planner_success"] for row in rows if row["phase"] == "exact_top_down"):
+                break
+            if not phase_had_ik_success:
+                print("TCP_EXACT_TOP_DOWN_NO_IK_SUCCESS testing bounded tilted candidates up to 20 degrees")
     print("TCP_YAW_CANDIDATE_SUMMARY_JSON " + json.dumps({{
         "candidate_count": len(rows),
         "planner_success_count": sum(1 for row in rows if row["planner_success"]),
         "ik_success_count": sum(1 for row in rows if row["ik_success"]),
         "rows": rows,
     }}, sort_keys=True))
-    raise RuntimeError("MoveIt planning failed for transit_to_source_hover for all top-down TCP yaw candidates")
+    raise RuntimeError("MoveIt planning failed for transit_to_source_hover for all tested TCP candidates")
 
 
 def execute_trajectory(planner, name, trajectory):
@@ -1059,8 +1134,8 @@ if selected_tcp_link != TCP_LINK:
 planner.set_max_velocity_scaling_factor(float(CONFIG["velocity_scaling"]))
 planner.set_max_acceleration_scaling_factor(float(CONFIG["acceleration_scaling"]))
 planner.set_start_state_to_current_state()
-planner.set_planning_time(10.0)
-planner.set_num_planning_attempts(20)
+planner.set_planning_time(5.0)
+planner.set_num_planning_attempts(5)
 planner.set_goal_position_tolerance(0.005)
 planner.set_goal_orientation_tolerance(math.radians(5.0))
 
