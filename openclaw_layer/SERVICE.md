@@ -7,16 +7,16 @@ Update this file first when the service host or port changes.
 
 ## Shared Service Host
 
-- `SERVICE_HOST=172.29.24.220`
+- `SERVICE_HOST=192.168.1.104`
 
 ## Service Table
 
 | Service | Purpose | IP / Host | Port | Base URL | Main Endpoint |
 |---|---|---|---|---|---|
-| SpatialMemory | Robot memory write / query / retrieval | `172.29.24.220` | `8012` | `http://172.29.24.220:8012` | `/health`, `/query/*`, `/memory/*` |
-| YOLO | Object detection service | `172.29.24.220` | `8013` | `http://172.29.24.220:8013` | `/health`, `/detect` |
-| VLAC | Task progress / completion critic | `172.29.24.220` | `8014` | `http://172.29.24.220:8014` | `/health`, `/critic` |
-| GraspAnything | Grasp proposal / grasp detection service | `172.29.24.220` | `8015` | `http://172.29.24.220:8015` | `/health`, `/grasp/detect` |
+| SpatialMemory | Robot memory write / query / retrieval | `192.168.1.104` | `8012` | `http://192.168.1.104:8012` | `/health`, `/query/*`, `/memory/*` |
+| YOLO | Object detection service | `192.168.1.104` | `8013` | `http://192.168.1.104:8013` | `/health`, `/detect` |
+| VLAC | Task progress / completion critic | `192.168.1.104` | `8014` | `http://192.168.1.104:8014` | `/health`, `/critic` |
+| GraspAnything | Grasp proposal / grasp detection service | `192.168.1.104` | `8015` | `http://192.168.1.104:8015` | `/health`, `/grasp/detect` |
 
 ## Notes
 
