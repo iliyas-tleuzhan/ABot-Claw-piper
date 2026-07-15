@@ -84,6 +84,7 @@ if os.environ.get("PIPER_ENV_SOURCED") != "1":
 import rospy
 from geometry_msgs.msg import PoseStamped
 from moveit_ctrl.srv import JointMoveitCtrl, JointMoveitCtrlRequest
+from piper_msgs.srv import Enable
 from tf.transformations import quaternion_from_euler
 
 try:
@@ -106,6 +107,8 @@ ARM_JOINT_BOUNDS = (
     (-2.0944, 2.0944),
 )
 DEFAULT_JOINT_LIMIT_TOLERANCE_RAD = 0.002
+MOVEIT_GRIPPER_JOINT7_MIN_M = 0.0
+MOVEIT_GRIPPER_JOINT7_MAX_M = 0.035
 
 
 def normalize_arm_joint_targets(
@@ -164,6 +167,17 @@ def normalize_arm_joint_targets(
     return normalized
 
 
+def total_opening_width_to_moveit_finger_joint(total_opening_width_m: float) -> float:
+    """Convert public Piper jaw opening width to MoveIt joint7 displacement."""
+    return float(
+        np.clip(
+            float(total_opening_width_m) / 2.0,
+            MOVEIT_GRIPPER_JOINT7_MIN_M,
+            MOVEIT_GRIPPER_JOINT7_MAX_M,
+        )
+    )
+
+
 @dataclass
 class CameraFrame:
     device_id: str
@@ -203,6 +217,7 @@ class PiperRobotEnv:
 
         self._joint_state_topic = ros_cfg.get("joint_state_topic", "/joint_states_single")
         self._end_pose_topic = ros_cfg.get("end_pose_topic", "/end_pose")
+        self._piper_enable_checked = False
 
         if init_ros_node and not rospy.get_node_uri():
             import xmlrpc.client
@@ -269,10 +284,29 @@ class PiperRobotEnv:
     #                   MoveIt 服务调用（内部）
     # ------------------------------------------------------------------ #
 
+    def _ensure_piper_enabled(self):
+        if self._piper_enable_checked:
+            return True
+
+        try:
+            rospy.wait_for_service("/enable_srv", timeout=5.0)
+            enable_srv = rospy.ServiceProxy("/enable_srv", Enable)
+            response = enable_srv(enable_request=True)
+        except Exception as exc:
+            rospy.logwarn("Failed to call /enable_srv before arm motion: %s", exc)
+            return False
+
+        enabled = bool(getattr(response, "enable_response", False))
+        rospy.loginfo("Piper enable preflight: /enable_srv enable_response=%s", enabled)
+        self._piper_enable_checked = enabled
+        return enabled
+
     def _call_moveit_arm(self, joint_states, max_velocity=None, max_acceleration=None):
         """通过 joint_moveit_ctrl_arm 服务控制 6 个关节"""
         vel = max_velocity or self.max_velocity
         acc = max_acceleration or self.max_acceleration
+        if not self._ensure_piper_enabled():
+            return False
         normalized_joints = normalize_arm_joint_targets(
             joint_states,
             self.JOINT_LIMIT_TOLERANCE_RAD,
@@ -292,39 +326,70 @@ class PiperRobotEnv:
             rospy.logwarn(f"moveit_ctrl_arm failed, error_code: {resp.error_code}")
         return resp.status
 
-    def _call_moveit_gripper(self, gripper, max_velocity=None, max_acceleration=None):
+    def _call_moveit_gripper(self, total_opening_width_m, max_velocity=None, max_acceleration=None):
         """通过 joint_moveit_ctrl_gripper 服务控制夹爪"""
         vel = max_velocity or self.max_velocity
         acc = max_acceleration or self.max_acceleration
+        requested_total_opening_width_m = float(total_opening_width_m)
+        clamped_total_opening_width_m = float(
+            np.clip(requested_total_opening_width_m, self.GRIPPER_MIN, self.GRIPPER_MAX)
+        )
+        moveit_finger_joint_m = total_opening_width_to_moveit_finger_joint(
+            clamped_total_opening_width_m
+        )
 
         rospy.wait_for_service("joint_moveit_ctrl_gripper", timeout=5.0)
         srv = rospy.ServiceProxy("joint_moveit_ctrl_gripper", JointMoveitCtrl)
         req = JointMoveitCtrlRequest()
         req.joint_states = [0.0] * self.NUM_JOINTS
-        req.gripper = float(np.clip(gripper, self.GRIPPER_MIN, self.GRIPPER_MAX))
+        req.gripper = moveit_finger_joint_m
         req.max_velocity = vel
         req.max_acceleration = acc
 
         resp = srv(req)
+        rospy.loginfo(
+            "set_gripper total_opening_width_m=%.6f clamped_total_opening_width_m=%.6f "
+            "moveit_finger_joint_m=%.6f status=%s error_code=%s",
+            requested_total_opening_width_m,
+            clamped_total_opening_width_m,
+            moveit_finger_joint_m,
+            bool(resp.status),
+            getattr(resp, "error_code", "unknown"),
+        )
         if not resp.status:
-            rospy.logwarn(f"moveit_ctrl_gripper failed, error_code: {resp.error_code}")
+            rospy.logwarn(
+                "moveit_ctrl_gripper failed: requested total_opening_width_m=%.6f, "
+                "moveit_finger_joint_m=%.6f, status=%s, error_code=%s",
+                requested_total_opening_width_m,
+                moveit_finger_joint_m,
+                bool(resp.status),
+                getattr(resp, "error_code", "unknown"),
+            )
         return resp.status
 
-    def _call_moveit_piper(self, joint_states, gripper, max_velocity=None, max_acceleration=None):
+    def _call_moveit_piper(self, joint_states, total_opening_width_m, max_velocity=None, max_acceleration=None):
         """通过 joint_moveit_ctrl_piper 服务同时控制关节 + 夹爪"""
         vel = max_velocity or self.max_velocity
         acc = max_acceleration or self.max_acceleration
+        if not self._ensure_piper_enabled():
+            return False
         normalized_joints = normalize_arm_joint_targets(
             joint_states,
             self.JOINT_LIMIT_TOLERANCE_RAD,
             rospy.logwarn,
+        )
+        clamped_total_opening_width_m = float(
+            np.clip(float(total_opening_width_m), self.GRIPPER_MIN, self.GRIPPER_MAX)
+        )
+        moveit_finger_joint_m = total_opening_width_to_moveit_finger_joint(
+            clamped_total_opening_width_m
         )
 
         rospy.wait_for_service("joint_moveit_ctrl_piper", timeout=5.0)
         srv = rospy.ServiceProxy("joint_moveit_ctrl_piper", JointMoveitCtrl)
         req = JointMoveitCtrlRequest()
         req.joint_states = normalized_joints
-        req.gripper = float(np.clip(gripper, self.GRIPPER_MIN, self.GRIPPER_MAX))
+        req.gripper = moveit_finger_joint_m
         req.max_velocity = vel
         req.max_acceleration = acc
 
@@ -340,6 +405,8 @@ class PiperRobotEnv:
         """
         vel = max_velocity or self.max_velocity
         acc = max_acceleration or self.max_acceleration
+        if not self._ensure_piper_enabled():
+            return False
 
         rospy.wait_for_service("joint_moveit_ctrl_endpose", timeout=5.0)
         srv = rospy.ServiceProxy("joint_moveit_ctrl_endpose", JointMoveitCtrl)

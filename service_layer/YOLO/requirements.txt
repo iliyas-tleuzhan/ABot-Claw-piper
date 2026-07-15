@@ -7,10 +7,13 @@ opencv-python>=4.1.2
 Pillow
 PyYAML>=5.3.1
 scipy>=1.4.1
+requests
 --extra-index-url https://download.pytorch.org/whl/cu124
 torch==2.5.1+cu124
 torchvision==0.20.1+cu124
 tqdm>=4.41.0
+ultralytics
+gitpython>=3.1.30
 
 # logging -------------------------------------
 tensorboard>=2.4.1

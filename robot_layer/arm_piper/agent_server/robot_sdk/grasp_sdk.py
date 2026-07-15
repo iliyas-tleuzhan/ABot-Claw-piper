@@ -495,11 +495,20 @@ class GraspSDK:
                     # 没有旋转信息无法转换到 base_link
                     continue
 
+                translation_camera = g.get("translation_camera")
                 p_base = self._cam_to_base_point(translation_camera_retreat)
+                p_base_center = None
+                if translation_camera is not None:
+                    p_base_center = self._cam_to_base_point(translation_camera)
                 R_base = self._cam_to_base_rot(R_cam)
                 q_base = self._rot_to_quat_xyzw(R_base)
 
                 R_cam_out = R_cam.tolist() if isinstance(R_cam, np.ndarray) else R_cam
+                t_cam_out = (
+                    [float(x) for x in translation_camera]
+                    if isinstance(translation_camera, (list, tuple, np.ndarray))
+                    else translation_camera
+                )
                 t_cam_ret_out = (
                     [float(x) for x in translation_camera_retreat]
                     if isinstance(translation_camera_retreat, (list, tuple, np.ndarray))
@@ -510,9 +519,15 @@ class GraspSDK:
                     "score": float(g.get("score", 0.0)),
                     "width": float(g.get("width", 0.0)),
                     # 保留相机坐标系信息，便于调试
+                    "translation_camera": t_cam_out,
                     "translation_camera_retreat": t_cam_ret_out,
                     "rotation_camera": R_cam_out,
                     # 给执行用的 base_link 位姿
+                    "translation_base": (
+                        [float(x) for x in p_base_center.tolist()]
+                        if p_base_center is not None
+                        else [float(x) for x in p_base.tolist()]
+                    ),
                     "translation_base_retreat": [float(x) for x in p_base.tolist()],
                     "quaternion_base": [float(x) for x in q_base.tolist()],
                 })
