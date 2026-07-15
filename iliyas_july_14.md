@@ -293,3 +293,9 @@ Next likely improvement:
 - publish a decimated/smoothed command stream while preserving strict final feedback
 
 This should be done in the bridge adapter layer, not by changing perception or calibration.
+
+## Nested Piper ROS Freeze
+
+- Repository: https://github.com/iliyas-tleuzhan/piper_ros.git
+- Branch: noetic
+- Commit: 84a37c57ca3c2d4d27bc8f097cc15aa70fdc2ead
