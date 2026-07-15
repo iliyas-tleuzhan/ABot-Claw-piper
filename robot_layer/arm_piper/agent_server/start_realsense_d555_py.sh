@@ -12,8 +12,8 @@ source "${ROS_WS}/devel/setup.bash"
 
 CAMERA_NAME="${REALSENSE_CAMERA_NAME:-table_camera}"
 SERIAL="${REALSENSE_SERIAL:-352222303634}"
-WIDTH="${REALSENSE_COLOR_WIDTH:-640}"
-HEIGHT="${REALSENSE_COLOR_HEIGHT:-360}"
+WIDTH="${REALSENSE_COLOR_WIDTH:-1280}"
+HEIGHT="${REALSENSE_COLOR_HEIGHT:-720}"
 # The D555e currently enumerates through USB 2.1, where 640x360 color/depth
 # supports up to 15 FPS. Set REALSENSE_FPS=30 only when USB 3 is available.
 FPS="${REALSENSE_FPS:-15}"

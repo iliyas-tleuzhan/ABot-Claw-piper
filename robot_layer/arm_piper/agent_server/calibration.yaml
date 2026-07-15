@@ -1,0 +1,11 @@
+camera_to_base:
+  # robot x = camera depth - offset
+  - [0.0, 0.0, 1.0, -0.35]
+
+  # robot y = -camera x
+  - [-1.0, 0.0, 0.0, 0.0]
+
+  # robot z = fixed table/object height
+  - [0.0, 0.0, 0.0, 0.04]
+
+  - [0.0, 0.0, 0.0, 1.0]

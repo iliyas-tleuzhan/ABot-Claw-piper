@@ -16,12 +16,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<'EOF'
-Usage: ./start_abotclaw_all.sh [--restart] [--use-fake-depth]
+Usage: ./start_abotclaw_all.sh [--restart] [--use-fake-depth] [--no-attach|--detach]
        ./start_abotclaw_all.sh [--status|--stop]
 
   (no option)  Start the infrastructure if needed, then attach to tmux.
   --restart     Kill the existing abotclaw tmux session and start it fresh.
   --use-fake-depth  Use the raw ROS RealSense publisher plus fake aligned-depth bridge.
+  --no-attach, --detach  Start/reuse the tmux session and return without attaching.
   --status      Show Docker, tmux, and ROS quick status without starting anything.
   --stop        Stop only the abotclaw tmux session; Docker continues running.
 EOF
@@ -317,6 +318,7 @@ EOF
 main() {
     local action="start"
     local restart=false
+    local attach=true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
@@ -328,6 +330,9 @@ main() {
                 ;;
             --use-fake-depth)
                 USE_FAKE_DEPTH=true
+                ;;
+            --no-attach|--detach)
+                attach=false
                 ;;
             --stop)
                 action="stop"
@@ -346,6 +351,10 @@ main() {
 
     if [[ "${action}" != "start" && ( "${restart}" == true || "${USE_FAKE_DEPTH}" == true ) ]]; then
         echo "ERROR: --restart and --use-fake-depth can only be used when starting." >&2
+        exit 2
+    fi
+    if [[ "${action}" != "start" && "${attach}" == false ]]; then
+        echo "ERROR: --no-attach/--detach can only be used when starting." >&2
         exit 2
     fi
 
@@ -379,8 +388,12 @@ main() {
             echo "Restarting tmux session ${SESSION}..."
             tmux kill-session -t "${SESSION}"
         else
-            echo "tmux session ${SESSION} already exists; attaching without starting duplicate services."
-            exec tmux attach-session -t "${SESSION}"
+            echo "tmux session ${SESSION} already exists; not starting duplicate services."
+            if [[ "${attach}" == true ]]; then
+                exec tmux attach-session -t "${SESSION}"
+            fi
+            echo "Attach with: tmux attach -t ${SESSION}"
+            exit 0
         fi
     fi
 
@@ -412,7 +425,9 @@ main() {
     tmux select-window -t "${SESSION}:roscore"
 
     echo "Started tmux session ${SESSION}. Attach with: tmux attach -t ${SESSION}"
-    exec tmux attach-session -t "${SESSION}"
+    if [[ "${attach}" == true ]]; then
+        exec tmux attach-session -t "${SESSION}"
+    fi
 }
 
 main "$@"

@@ -15,4 +15,8 @@
   <param name="/move_group/trajectory_execution/allowed_execution_duration_scaling" value="3.0" />
   <param name="/move_group/trajectory_execution/allowed_goal_duration_margin" value="5.0" />
   <param name="/move_group/trajectory_execution/allowed_start_tolerance" value="0.03" />
+
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher" output="screen">
+    <param name="publish_frequency" value="50.0" />
+  </node>
 </launch>
