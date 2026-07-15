@@ -22,9 +22,9 @@ class PiperTrajectoryBridge:
         self.command_topic = rospy.get_param("~command_topic", "/piper_joint_commands")
         self.feedback_topic = rospy.get_param("~feedback_topic", "/joint_states_single")
         self.arm_require_feedback = rospy.get_param("~arm_require_feedback", True)
-        self.arm_min_speed_percent = rospy.get_param("~arm_min_speed_percent", 10.0)
-        self.arm_max_speed_percent = rospy.get_param("~arm_max_speed_percent", 20.0)
-        self.arm_speed_reference_rad_s = rospy.get_param("~arm_speed_reference_rad_s", 3.0)
+        self.hardware_speed_percent = rospy.get_param("~hardware_speed_percent", 100.0)
+        self.trajectory_command_rate_hz = rospy.get_param("~trajectory_command_rate_hz", 20.0)
+        self.redundant_joint_delta_rad = rospy.get_param("~redundant_joint_delta_rad", 0.001)
         self.feedback_tolerance_rad = rospy.get_param("~feedback_tolerance_rad", 0.02)
         self.feedback_timeout_s = rospy.get_param("~feedback_timeout_s", 45.0)
         self.gripper_service_name = rospy.get_param("~gripper_service", "/gripper_srv")
@@ -57,6 +57,13 @@ class PiperTrajectoryBridge:
             "Piper trajectory bridge ready: MoveIt arm trajectories publish to %s and wait for %s",
             self.command_topic,
             self.feedback_topic,
+        )
+        rospy.loginfo(
+            "Piper trajectory execution policy: hardware_speed_percent=%.1f "
+            "trajectory_command_rate_hz=%.1f redundant_joint_delta_rad=%.4f",
+            self.effective_hardware_speed_percent(),
+            float(self.trajectory_command_rate_hz),
+            float(self.redundant_joint_delta_rad),
         )
         rospy.loginfo(
             "Piper gripper trajectory bridge ready: MoveIt gripper trajectories call %s",
@@ -130,20 +137,39 @@ class PiperTrajectoryBridge:
             rate.sleep()
         return False
 
-    def arm_speed_percent_for_point(self, point) -> float:
-        if len(point.velocities) == len(ARM_JOINTS):
-            max_velocity_rad_s = max(abs(float(v)) for v in point.velocities)
-            if max_velocity_rad_s > 0.0:
-                speed_percent = 100.0 * max_velocity_rad_s / float(self.arm_speed_reference_rad_s)
-            else:
-                speed_percent = self.arm_min_speed_percent
-        else:
-            speed_percent = self.arm_min_speed_percent
+    def effective_hardware_speed_percent(self) -> float:
+        return max(0.0, min(100.0, float(self.hardware_speed_percent)))
 
-        return max(
-            float(self.arm_min_speed_percent),
-            min(float(self.arm_max_speed_percent), speed_percent),
-        )
+    def select_command_points(self, points):
+        """Decimate MoveIt's dense timed path before handing it to Piper hardware.
+
+        MoveIt remains responsible for planning, collision checking, timing, and
+        the final target. The Piper driver accepts position targets plus one
+        global hardware speed value, so sending hundreds of near-identical
+        points makes the hardware repeatedly retarget instead of following one
+        smooth timed command stream.
+        """
+        if len(points) <= 2:
+            return list(points)
+
+        min_interval_s = 1.0 / max(1.0, float(self.trajectory_command_rate_hz))
+        min_delta = float(self.redundant_joint_delta_rad)
+        selected = [points[0]]
+        last_time = points[0].time_from_start.to_sec()
+        last_positions = [float(v) for v in points[0].positions]
+
+        for point in points[1:-1]:
+            current_time = point.time_from_start.to_sec()
+            positions = [float(v) for v in point.positions]
+            max_delta = max(abs(a - b) for a, b in zip(positions, last_positions))
+            if current_time - last_time >= min_interval_s and max_delta >= min_delta:
+                selected.append(point)
+                last_time = current_time
+                last_positions = positions
+
+        if selected[-1] is not points[-1]:
+            selected.append(points[-1])
+        return selected
 
     def execute_arm(self, goal) -> None:
         trajectory = goal.trajectory
@@ -158,8 +184,17 @@ class PiperTrajectoryBridge:
             self.reject(result, "Each trajectory point must contain six arm joint positions")
             return
 
+        command_points = self.select_command_points(trajectory.points)
+        rospy.loginfo(
+            "Executing Piper arm trajectory: original_points=%d command_points=%d "
+            "hardware_speed_percent=%.1f",
+            len(trajectory.points),
+            len(command_points),
+            self.effective_hardware_speed_percent(),
+        )
+
         started_at = rospy.Time.now()
-        for point in trajectory.points:
+        for point in command_points:
             while not rospy.is_shutdown() and rospy.Time.now() - started_at < point.time_from_start:
                 if self.server.is_preempt_requested():
                     self.server.set_preempted(text="Trajectory preempted")
@@ -170,8 +205,7 @@ class PiperTrajectoryBridge:
             command.header.stamp = rospy.Time.now()
             command.name = list(ARM_JOINTS)
             command.position = list(point.positions)
-            speed_percent = self.arm_speed_percent_for_point(point)
-            command.velocity = [0.0] * len(ARM_JOINTS) + [speed_percent]
+            command.velocity = [0.0] * len(ARM_JOINTS) + [self.effective_hardware_speed_percent()]
             self.command_publisher.publish(command)
 
             feedback = FollowJointTrajectoryFeedback()

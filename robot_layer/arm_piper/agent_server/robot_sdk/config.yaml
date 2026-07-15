@@ -93,9 +93,12 @@ piper:
   # ROS environment setup.bash path.
   setup_bash: "/root/ABot-Claw/robot_layer/arm_piper/agent_server/robot_driver_ros/devel/setup.bash"
 
-  # MoveIt default velocity and acceleration scaling factors (0 to 1).
-  max_velocity: 0.5
-  max_acceleration: 0.5
+  # Normal MoveIt velocity and acceleration scaling factors (0 to 1).
+  max_velocity: 1.0
+  max_acceleration: 1.0
+
+  # Normal global Piper hardware speed percentage passed to the official driver.
+  hardware_speed_percent: 100
 
   # Clamp only small numerical joint-target drift at MoveIt position bounds.
   joint_limit_tolerance_rad: 0.002
