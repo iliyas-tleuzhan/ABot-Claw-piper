@@ -14,6 +14,55 @@ from urllib import error, request
 TERMINAL_STATUSES = {"completed", "failed", "timeout", "stopped", "idle"}
 
 
+def compute_gripper_plan_values(
+    detected_width: float,
+    gripper_min: float,
+    gripper_max: float,
+    close_width_override: Optional[float],
+    execute: bool,
+) -> Dict[str, Any]:
+    detected = float(detected_width)
+    gripper_min = float(gripper_min)
+    gripper_max = float(gripper_max)
+    open_width = gripper_max
+    saturated = detected >= gripper_max - 0.001
+
+    if close_width_override is None:
+        source = "automatic"
+        close_width = None if saturated else max(gripper_min, detected - 0.005)
+    else:
+        source = "explicit"
+        close_width = float(close_width_override)
+
+    if close_width is not None:
+        if not (gripper_min <= close_width <= gripper_max):
+            raise ValueError(
+                "close_width %.4f outside gripper range %.4f..%.4f"
+                % (close_width, gripper_min, gripper_max)
+            )
+        if not close_width < open_width:
+            raise ValueError(
+                "close_width %.4f must be smaller than open_width %.4f"
+                % (close_width, open_width)
+            )
+
+    if execute and saturated and close_width_override is None:
+        raise ValueError(
+            "Detected grasp width %.4f m is saturated at gripper max %.4f m; "
+            "execute mode requires explicit --close-width"
+            % (detected, gripper_max)
+        )
+
+    return {
+        "detected_width_m": detected,
+        "estimate_saturated": saturated,
+        "open_width_m": open_width,
+        "close_width_m": close_width,
+        "close_width_source": source,
+        "grip_margin_m": None if close_width is None else detected - close_width,
+    }
+
+
 def http_json(
     method: str,
     url: str,
@@ -44,8 +93,10 @@ def build_robot_code(args: argparse.Namespace) -> str:
         "plan_only": args.plan_only,
         "perception_only": args.perception_only,
         "destination_perception_only": args.destination_perception_only,
+        "execute": args.execute,
         "source_provider": args.source_provider,
         "source_width": args.source_width,
+        "close_width": args.close_width,
         "source_xyz": [args.source_x, args.source_y, args.source_z],
         "aruco_frame": args.aruco_frame,
         "aruco_offset_xyz": [args.aruco_offset_x, args.aruco_offset_y, args.aruco_offset_z],
@@ -311,6 +362,48 @@ def execute_trajectory(planner, name, trajectory):
         raise RuntimeError("Execution failed at " + name)
 
 
+def compute_gripper_plan(detected_width, close_width_override):
+    detected = float(detected_width)
+    gripper_min = float(env.GRIPPER_MIN)
+    gripper_max = float(env.GRIPPER_MAX)
+    open_width = gripper_max
+    saturated = detected >= gripper_max - 0.001
+    if close_width_override is None:
+        source = "automatic"
+        close_width = None if saturated else max(gripper_min, detected - 0.005)
+    else:
+        source = "explicit"
+        close_width = float(close_width_override)
+
+    if close_width is not None:
+        if not (gripper_min <= close_width <= gripper_max):
+            raise RuntimeError(
+                "close_width %.4f outside gripper range %.4f..%.4f"
+                % (close_width, gripper_min, gripper_max)
+            )
+        if not close_width < open_width:
+            raise RuntimeError(
+                "close_width %.4f must be smaller than open_width %.4f"
+                % (close_width, open_width)
+            )
+
+    if CONFIG["execute"] and saturated and close_width_override is None:
+        raise RuntimeError(
+            "Detected grasp width %.4f m is saturated at gripper max %.4f m; "
+            "execute mode requires explicit --close-width"
+            % (detected, gripper_max)
+        )
+
+    return {{
+        "detected_width_m": detected,
+        "estimate_saturated": saturated,
+        "open_width_m": open_width,
+        "close_width_m": close_width,
+        "close_width_source": source,
+        "grip_margin_m": None if close_width is None else detected - close_width,
+    }}
+
+
 def depth_to_m(depth_value):
     value = float(depth_value)
     if value <= 0.0:
@@ -555,8 +648,16 @@ source_detection = select_source()
 source_camera = source_detection["camera_xyz"]
 source_base = source_detection["base_xyz"]
 width = float(source_detection["width_m"])
-open_width = float(env.GRIPPER_MAX)
-close_width = max(float(env.GRIPPER_MIN), min(float(env.GRIPPER_MAX), width * 0.35))
+gripper_plan = compute_gripper_plan(width, CONFIG["close_width"])
+open_width = float(gripper_plan["open_width_m"])
+close_width = gripper_plan["close_width_m"]
+print("GRIPPER_PLAN_JSON " + json.dumps(gripper_plan, sort_keys=True))
+if gripper_plan["estimate_saturated"] and gripper_plan["close_width_source"] == "automatic":
+    print(
+        "WARNING_GRIPPER_WIDTH_SATURATED detected_width_m=%.4f is at/near gripper max; "
+        "plan/perception may continue but execute requires --close-width"
+        % width
+    )
 
 destination = None
 destination_base = None
@@ -815,6 +916,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-x", type=float)
     parser.add_argument("--source-y", type=float)
     parser.add_argument("--source-z", type=float)
+    parser.add_argument("--close-width", type=float, help="Explicit total physical gripper opening in meters")
     parser.add_argument("--aruco-frame", default="aruco_marker_frame")
     parser.add_argument("--aruco-offset-x", type=float, default=0.0)
     parser.add_argument("--aruco-offset-y", type=float, default=0.0)
@@ -858,6 +960,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--source-provider aruco requires --source-width")
     if args.source_width is not None and args.source_width <= 0.0:
         parser.error("--source-width must be greater than 0")
+    if args.close_width is not None and args.close_width <= 0.0:
+        parser.error("--close-width must be greater than 0")
     if args.execute:
         args.plan_only = False
     return args
