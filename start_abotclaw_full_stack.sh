@@ -31,6 +31,8 @@ REMOTE_REPO="/workspace/ABot-Claw-piper"
 REMOTE_YOLO_CONTAINER="yolo-5090-torch"
 REMOTE_YOLO_URL="http://${REMOTE_HOST}:8013"
 REMOTE_GRASP_URL="http://${REMOTE_HOST}:8015"
+LOCAL_YOLO_URL="${ABOT_YOLO_URL:-http://127.0.0.1:8013}"
+LOCAL_GRASP_URL="${ABOT_GRASP_URL:-http://127.0.0.1:8015}"
 AGENT_URL="http://localhost:8888"
 LOG_DIR="${REPO_DIR}/.abot_full_stack_logs"
 MODE="start"
@@ -434,7 +436,26 @@ ssh_remote_loose() {
 }
 
 remote_health_json() {
-    curl -fsS --max-time 4 "$1/health" 2>/dev/null || true
+    local base="${1%/}"
+    base="${base%/grasp/detect}"
+    base="${base%/detect}"
+    curl -fsS --max-time 4 "${base}/health" 2>/dev/null || true
+}
+
+service_health_label() {
+    local body="$1"
+    local status
+    if [[ -z "${body}" ]]; then
+        echo "unavailable"
+        return 0
+    fi
+    status="$(json_field "${body}" status)"
+    case "${status}" in
+        ok) echo "ok" ;;
+        degraded) echo "degraded" ;;
+        "") echo "unavailable" ;;
+        *) echo "not ready: ${status}" ;;
+    esac
 }
 
 yolo_healthy() {
@@ -512,8 +533,13 @@ remote_grasp_health_json() {
 }
 
 remote_grasp_backend() {
-    local body backend model_loaded
+    local body status backend model_loaded
     body="$(remote_grasp_health_json)"
+    status="$(json_field "${body}" status)"
+    if [[ "${status}" != "ok" ]]; then
+        echo ""
+        return 0
+    fi
     backend="$(json_field "${body}" backend)"
     model_loaded="$(json_field "${body}" model_loaded)"
     if [[ "${backend}" == "depth_fallback" ]]; then
@@ -525,8 +551,12 @@ remote_grasp_backend() {
     fi
 }
 
+remote_grasp_health_label() {
+    service_health_label "$(remote_grasp_health_json)"
+}
+
 remote_grasp_healthy() {
-    [[ -n "$(remote_grasp_backend)" ]]
+    [[ "$(remote_grasp_health_label)" == "ok" ]]
 }
 
 remote_anygrasp_assets_ready() {
@@ -568,21 +598,29 @@ start_remote_grasp_service() {
         set_status "GraspAnything status" "not ready: ${REMOTE_YOLO_CONTAINER} missing"
         return 0
     fi
-    local running backend body
+    local running backend body grasp_status yolo_ok
     running="$(ssh_remote_loose "docker inspect -f '{{.State.Status}}' '${REMOTE_YOLO_CONTAINER}' 2>/dev/null")"
     if [[ "${running}" != "running" && "${MODE}" != "status" ]]; then
         ssh_remote "docker start '${REMOTE_YOLO_CONTAINER}' >/dev/null"
     fi
 
+    body="$(remote_grasp_health_json)"
+    grasp_status="$(service_health_label "${body}")"
+    yolo_ok="$(json_field "${body}" yolo_ok)"
     backend="$(remote_grasp_backend)"
     if [[ -n "${backend}" ]]; then
         set_status "Grasp backend" "${backend}"
-        set_status "GraspAnything status" "healthy"
+        set_status "GraspAnything status" "${grasp_status}"
+        set_status "Grasp yolo_ok" "${yolo_ok:-unknown}"
         return 0
     fi
     if [[ "${MODE}" == "status" ]]; then
-        set_status "Grasp backend" "not ready"
-        check_grasp_assets || true
+        set_status "Grasp backend" "$(json_field "${body}" backend)"
+        set_status "GraspAnything status" "${grasp_status}"
+        set_status "Grasp yolo_ok" "${yolo_ok:-unknown}"
+        if [[ "${grasp_status}" == "unavailable" ]]; then
+            check_grasp_assets || true
+        fi
         return 0
     fi
 
@@ -605,13 +643,17 @@ nohup env PORT=8015 YOLO_URL=http://127.0.0.1:8013 python3 grasp_service_depth_f
 
     wait_until "remote grasp service health" 30 2 remote_grasp_healthy >/dev/null || true
     body="$(remote_grasp_health_json)"
+    grasp_status="$(service_health_label "${body}")"
+    yolo_ok="$(json_field "${body}" yolo_ok)"
     backend="$(remote_grasp_backend)"
     if [[ -n "${backend}" ]]; then
         set_status "Grasp backend" "${backend}"
-        set_status "GraspAnything status" "healthy"
+        set_status "GraspAnything status" "${grasp_status}"
+        set_status "Grasp yolo_ok" "${yolo_ok:-unknown}"
     else
-        set_status "Grasp backend" "not ready"
-        set_status "GraspAnything status" "not ready: $(json_field "${body}" status)"
+        set_status "Grasp backend" "$(json_field "${body}" backend)"
+        set_status "GraspAnything status" "${grasp_status}"
+        set_status "Grasp yolo_ok" "${yolo_ok:-unknown}"
     fi
 }
 
@@ -625,11 +667,14 @@ check_remote_services() {
         return 0
     fi
     start_remote_yolo
-    local body
+    local body yolo_status local_yolo_body local_yolo_status local_grasp_body local_grasp_status
     body="$(remote_health_json "${REMOTE_YOLO_URL}")"
-    set_status "YOLO health" "$(json_field "${body}" status)"
+    yolo_status="$(service_health_label "${body}")"
+    set_status "YOLO health" "${yolo_status}"
     set_status "YOLO model_loaded" "$(json_field "${body}" model_loaded)"
     set_status "YOLO CUDA device" "$(json_field "${body}" device)"
+    set_status "YOLO URL" "${REMOTE_YOLO_URL}"
+    set_status "YOLO backend" "remote"
     if docker_running && container_exec "curl -fsS --max-time 4 '${REMOTE_YOLO_URL}/health' >/dev/null 2>&1"; then
         set_status "container -> YOLO" "ok"
     else
@@ -638,6 +683,24 @@ check_remote_services() {
     check_optional_remote_service "SpatialMemory" 8012
     check_optional_remote_service "VLAC" 8014
     start_remote_grasp_service
+    set_status "Grasp URL" "${REMOTE_GRASP_URL}"
+    local_yolo_body="$(remote_health_json "${LOCAL_YOLO_URL}")"
+    local_yolo_status="$(service_health_label "${local_yolo_body}")"
+    local_grasp_body="$(remote_health_json "${LOCAL_GRASP_URL}")"
+    local_grasp_status="$(service_health_label "${local_grasp_body}")"
+    set_status "Local YOLO health" "${local_yolo_status}"
+    set_status "Local Grasp health" "${local_grasp_status}"
+    if [[ "${yolo_status}" != "ok" && "${local_yolo_status}" == "ok" ]]; then
+        set_status "YOLO backend" "local CPU"
+        set_status "YOLO URL" "${LOCAL_YOLO_URL}"
+        set_status "YOLO health" "${local_yolo_status}"
+    fi
+    if [[ "${STATUS["GraspAnything status"]:-unavailable}" != "ok" && "${local_grasp_status}" == "ok" ]]; then
+        set_status "Grasp backend" "local depth_fallback"
+        set_status "Grasp URL" "${LOCAL_GRASP_URL}"
+        set_status "GraspAnything status" "${local_grasp_status}"
+        set_status "Grasp yolo_ok" "$(json_field "${local_grasp_body}" yolo_ok)"
+    fi
 }
 
 print_calibration_guidance() {
@@ -867,13 +930,19 @@ Remote:
   route to ${REMOTE_HOST}:             ${STATUS["route to ${REMOTE_HOST}"]:-unknown}
   SSH connectivity:                    ${STATUS["SSH connectivity"]:-unknown}
   yolo-5090-torch state:               ${STATUS["yolo-5090-torch state"]:-unknown}
+  YOLO backend:                        ${STATUS["YOLO backend"]:-unknown}
+  YOLO URL:                            ${STATUS["YOLO URL"]:-${REMOTE_YOLO_URL}}
   YOLO health:                         ${STATUS["YOLO health"]:-unknown}
   YOLO model_loaded:                   ${STATUS["YOLO model_loaded"]:-unknown}
   YOLO CUDA device:                    ${STATUS["YOLO CUDA device"]:-unknown}
+  Local YOLO health:                   ${STATUS["Local YOLO health"]:-unknown}
   SpatialMemory status:                ${STATUS["SpatialMemory status"]:-unknown}
   VLAC status:                         ${STATUS["VLAC status"]:-unknown}
+  Grasp URL:                           ${STATUS["Grasp URL"]:-${REMOTE_GRASP_URL}}
   GraspAnything status:                ${STATUS["GraspAnything status"]:-unknown}
   Grasp backend:                       ${STATUS["Grasp backend"]:-unknown}
+  Grasp yolo_ok:                       ${STATUS["Grasp yolo_ok"]:-unknown}
+  Local Grasp health:                  ${STATUS["Local Grasp health"]:-unknown}
 
 Attach to the full-stack tmux session:
   tmux attach -t ${SESSION}
