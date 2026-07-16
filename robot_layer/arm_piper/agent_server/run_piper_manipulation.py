@@ -1063,16 +1063,45 @@ def point_in_box(point, min_xyz, max_xyz):
     return all(float(min_xyz[i]) <= float(point[i]) <= float(max_xyz[i]) for i in range(3))
 
 
+def voxel_source_comparison_geometry(voxel):
+    bounds = voxel.get("source_surface_bounds") or {{}}
+    surface_min = finite_vec("voxel.source_surface_bounds.min", bounds.get("min"), 3)
+    surface_max = finite_vec("voxel.source_surface_bounds.max", bounds.get("max"), 3)
+    surface_center = finite_vec("voxel.source_surface_xyz", voxel.get("source_surface_xyz"), 3)
+    grasp_depth = voxel.get("grasp_depth_m")
+    if grasp_depth is None:
+        comparison_center = list(surface_center)
+        comparison_min = list(surface_min)
+        comparison_max = list(surface_max)
+        semantics = "legacy_surface_bounds_without_grasp_depth"
+    else:
+        dz = float(grasp_depth)
+        comparison_center = [surface_center[0], surface_center[1], surface_center[2] + dz]
+        comparison_min = [surface_min[0], surface_min[1], surface_min[2] + dz]
+        comparison_max = [surface_max[0], surface_max[1], surface_max[2] + dz]
+        semantics = "source_surface_plus_grasp_depth_matches_perception_grasp_center"
+    return {{
+        "surface_center": surface_center,
+        "surface_min": surface_min,
+        "surface_max": surface_max,
+        "comparison_center": comparison_center,
+        "comparison_min": comparison_min,
+        "comparison_max": comparison_max,
+        "grasp_depth_m": None if grasp_depth is None else float(grasp_depth),
+        "comparison_semantics": semantics,
+    }}
+
+
 def select_validated_voxel(region, point, usage):
     voxels = region.get("validated_voxels") or []
     rows = []
     for voxel in voxels:
         if usage not in (voxel.get("usage") or []):
             continue
-        bounds = voxel.get("source_surface_bounds") or {{}}
-        min_xyz = finite_vec("voxel.min", bounds.get("min"), 3)
-        max_xyz = finite_vec("voxel.max", bounds.get("max"), 3)
-        center = finite_vec("voxel.source_surface_xyz", voxel.get("source_surface_xyz"), 3)
+        geometry = voxel_source_comparison_geometry(voxel)
+        min_xyz = geometry["comparison_min"]
+        max_xyz = geometry["comparison_max"]
+        center = geometry["comparison_center"]
         inside = point_in_box(point, min_xyz, max_xyz)
         signed_displacement = []
         for axis in range(3):
@@ -1088,9 +1117,14 @@ def select_validated_voxel(region, point, usage):
             "inside": inside,
             "displacement": vec_distance(point, center),
             "signed_displacement_to_bounds": signed_displacement,
-            "surface_center": center,
-            "surface_min": min_xyz,
-            "surface_max": max_xyz,
+            "surface_center": geometry["surface_center"],
+            "surface_min": geometry["surface_min"],
+            "surface_max": geometry["surface_max"],
+            "comparison_center": center,
+            "comparison_min": min_xyz,
+            "comparison_max": max_xyz,
+            "grasp_depth_m": geometry["grasp_depth_m"],
+            "comparison_semantics": geometry["comparison_semantics"],
         }})
     rows.sort(key=lambda row: (not row["inside"], row["displacement"]))
     return rows[0] if rows else None
@@ -1163,7 +1197,14 @@ def select_validated_grasp_region(source_base):
             "min": voxel_row["surface_min"],
             "max": voxel_row["surface_max"],
         }} if voxel_row else None,
+        "nearest_voxel_comparison_bounds": {{
+            "min": voxel_row["comparison_min"],
+            "max": voxel_row["comparison_max"],
+        }} if voxel_row else None,
         "nearest_voxel_center": voxel_row["surface_center"] if voxel_row else None,
+        "nearest_voxel_comparison_center": voxel_row["comparison_center"] if voxel_row else None,
+        "nearest_voxel_grasp_depth_m": voxel_row["grasp_depth_m"] if voxel_row else None,
+        "nearest_voxel_comparison_semantics": voxel_row["comparison_semantics"] if voxel_row else None,
         "nearest_voxel_signed_displacement_to_bounds": voxel_row["signed_displacement_to_bounds"] if voxel_row else None,
         "hover_height_key": selected["hover_height_key"],
         "selected_tcp_orientation": quat,
