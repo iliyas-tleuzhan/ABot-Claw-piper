@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -20,12 +21,68 @@ from config import TIMING
 
 logger = logging.getLogger(__name__)
 
+EXECUTOR_TEMPLATE_VERSION = "lazy-perception-v2"
+
 # Directory for code execution logs and saved scripts
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 _CODE_DIR = _LOG_DIR / "code_executions"
 
 # Dedicated logger for code execution output (stdout/stderr)
 _exec_logger: Optional[logging.Logger] = None
+
+
+def _git_sha(path: Optional[Path] = None) -> str:
+    root = path or Path(__file__).resolve().parents[3]
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _git_dirty(path: Optional[Path] = None) -> Optional[bool]:
+    root = path or Path(__file__).resolve().parents[3]
+    try:
+        status = subprocess.check_output(
+            ["git", "-C", str(root), "status", "--short"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+        return bool(status.strip())
+    except Exception:
+        return None
+
+
+def executor_runtime_metadata() -> dict:
+    return {
+        "executor_template_version": EXECUTOR_TEMPLATE_VERSION,
+        "code_executor_file": str(Path(__file__).resolve()),
+        "pid": os.getpid(),
+        "process_start_time": psutil_start_time(),
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+        "cwd": os.getcwd(),
+    }
+
+
+def psutil_start_time() -> Optional[float]:
+    try:
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+        start_ticks = int(stat.split()[21])
+        boot_time = 0.0
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                boot_time = float(line.split()[1])
+                break
+        ticks = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        return boot_time + start_ticks / ticks
+    except Exception:
+        return None
 
 
 def _get_exec_logger() -> logging.Logger:
@@ -668,6 +725,7 @@ class CodeExecutor:
         agent_server_dir = os.path.dirname(os.path.abspath(__file__))
         robot_sdk_dir = os.path.join(agent_server_dir, "robot_sdk")
 
+        metadata = executor_runtime_metadata()
         wrapper = f'''#!/usr/bin/env python3
 """Auto-generated code execution wrapper.
 
@@ -681,12 +739,16 @@ Architecture:
 """
 
 import sys
+import json
 sys.path.insert(0, "{robot_sdk_dir}")
 
 from piper_sdk import PiperRobotEnv
 from yolo_sdk import YoloSDK
 from grasp_sdk import GraspSDK
 from memory_sdk import MemorySDK
+
+EXECUTOR_TEMPLATE_JSON = {json.dumps(metadata, sort_keys=True)!r}
+print("EXECUTOR_TEMPLATE_JSON " + EXECUTOR_TEMPLATE_JSON, flush=True)
 
 # Robot control (ROS/MoveIt)
 env = PiperRobotEnv()

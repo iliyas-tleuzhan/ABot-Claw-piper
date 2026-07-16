@@ -824,7 +824,7 @@ start_rviz() {
         return 0
     fi
     local cmd
-    cmd="mkdir -p $(printf '%q' "${LOG_DIR}"); exec docker exec -i ${DOCKER_X11_ARGS} ${CONTAINER} bash -lc 'source /opt/ros/noetic/setup.bash; source ${ROS_WS}/devel/setup.bash; export ROS_MASTER_URI=http://localhost:11311; export ROS_HOSTNAME=localhost; roslaunch piper_with_gripper_moveit moveit_rviz.launch rviz_config:=${ROS_WS}/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/launch/moveit.rviz' 2>&1 | tee -a $(printf '%q' "${LOG_DIR}/rviz.log")"
+    cmd="mkdir -p $(printf '%q' "${LOG_DIR}"); exec docker exec -i ${DOCKER_X11_ARGS} ${CONTAINER} bash -lc 'source /opt/ros/noetic/setup.bash; source ${ROS_WS}/devel/setup.bash; export ROS_MASTER_URI=http://localhost:11311; export ROS_HOSTNAME=localhost; roslaunch piper_with_gripper_moveit moveit_rviz.launch rviz_config:=/root/ABot-Claw/robot_layer/arm_piper/agent_server/config/moveit_non_looping.rviz' 2>&1 | tee -a $(printf '%q' "${LOG_DIR}/rviz.log")"
     tmux_replace_window "rviz" "${cmd}"
 }
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+import traceback
 from typing import Any, Dict, Optional
 from urllib import error, request
 
@@ -101,6 +103,7 @@ def build_robot_code(args: argparse.Namespace) -> str:
         "grasp_region": args.grasp_region,
         "grasp_region_config": args.grasp_region_config,
         "max_grasp_tilt": args.max_grasp_tilt,
+        "visualize_candidates": args.visualize_candidates,
         "aruco_frame": args.aruco_frame,
         "aruco_offset_xyz": [args.aruco_offset_x, args.aruco_offset_y, args.aruco_offset_z],
         "top_k": args.top_k,
@@ -123,15 +126,18 @@ import math
 import os
 import time
 import xml.etree.ElementTree as ET
+import atexit
 
 import cv2
 import numpy as np
 import rospy
+import tf2_ros
 import yaml
 from geometry_msgs.msg import Point, Pose, PoseStamped
+from sensor_msgs.msg import CameraInfo, Image as RosImage
 from moveit_commander import MoveGroupCommander
-from moveit_msgs.msg import MoveItErrorCodes, RobotState
-from moveit_msgs.srv import GetPositionIK, GetPositionIKRequest, GetStateValidity, GetStateValidityRequest
+from moveit_msgs.msg import DisplayTrajectory, MoveItErrorCodes, RobotState
+from moveit_msgs.srv import GetPositionFK, GetPositionFKRequest, GetPositionIK, GetPositionIKRequest, GetStateValidity, GetStateValidityRequest
 from visualization_msgs.msg import Marker
 
 CONFIG = {repr(cfg)}
@@ -145,6 +151,25 @@ TCP_LOCAL_APPROACH_AXIS = [0.0, 0.0, 1.0]
 TCP_LOCAL_CLOSING_AXIS = [0.0, 1.0, 0.0]
 TARGET_APPROACH_AXIS = [0.0, 0.0, -1.0]
 TARGET_CLOSING_AXIS = [0.0, 1.0, 0.0]
+
+
+def section(title):
+    print("\\n=== " + title + " ===", flush=True)
+
+
+def clear_display_trajectory():
+    try:
+        pub = rospy.Publisher("/move_group/display_planned_path", DisplayTrajectory, queue_size=1, latch=True)
+        deadline = time.time() + 1.0
+        while pub.get_num_connections() == 0 and time.time() < deadline and not rospy.is_shutdown():
+            time.sleep(0.05)
+        pub.publish(DisplayTrajectory())
+        print("DISPLAY_TRAJECTORY_CLEARED", flush=True)
+    except Exception as exc:
+        print("DISPLAY_TRAJECTORY_CLEAR_FAILED " + str(exc), flush=True)
+
+
+atexit.register(clear_display_trajectory)
 
 
 def finite_vec(name, values, n):
@@ -474,7 +499,7 @@ def clamp_joint(name, value, limits):
     return float(max(lower, min(upper, value)))
 
 
-def ik_seed_states(planner):
+def ik_seed_states(planner, preferred_seed_joint_state=None):
     current_state = planner.get_current_state()
     joint_names = list(planner.get_active_joints())
     current_values = [float(x) for x in planner.get_current_joint_values()]
@@ -486,6 +511,20 @@ def ik_seed_states(planner):
         [0.0, 0.10, -0.10, 0.0, 0.0, 0.0],
     ]
     seeds = []
+    if preferred_seed_joint_state is not None:
+        state = RobotState()
+        state.is_diff = True
+        state.joint_state.name = joint_names
+        state.joint_state.position = [
+            clamp_joint(joint_name, preferred_seed_joint_state[index], limits)
+            for index, joint_name in enumerate(joint_names)
+        ]
+        seeds.append({{
+            "index": 0,
+            "label": "validated_preferred_seed",
+            "state": state,
+            "joint_positions": [float(x) for x in state.joint_state.position],
+        }})
     for index, offset in enumerate(offsets):
         state = RobotState()
         state.is_diff = True
@@ -497,7 +536,7 @@ def ik_seed_states(planner):
             positions.append(clamp_joint(joint_name, base + delta, limits))
         state.joint_state.position = positions
         seeds.append({{
-            "index": index,
+            "index": len(seeds),
             "label": "current" if index == 0 else "offset_%d" % index,
             "state": state,
             "joint_positions": [float(x) for x in positions],
@@ -524,14 +563,14 @@ def solution_joint_limit_distances(solution, active_joint_names, limits):
     }}
 
 
-def check_pose_ik(planner, pose):
+def check_pose_ik(planner, pose, preferred_seed_joint_state=None):
     try:
         rospy.wait_for_service("/compute_ik", timeout=5.0)
         service = rospy.ServiceProxy("/compute_ik", GetPositionIK)
         results = []
         active_joint_names = list(planner.get_active_joints())
         limits = joint_limits_from_robot_description(active_joint_names)
-        for seed in ik_seed_states(planner):
+        for seed in ik_seed_states(planner, preferred_seed_joint_state):
             req = GetPositionIKRequest()
             req.ik_request.group_name = "arm"
             req.ik_request.ik_link_name = TCP_LINK
@@ -562,6 +601,7 @@ def check_pose_ik(planner, pose):
             "success": success,
             "error": first_error,
             "seeds": results,
+            "solution": next((item for item in results if item.get("success")), None),
         }}
     except Exception as exc:
         return {{"available": False, "success": False, "error": str(exc), "seeds": []}}
@@ -660,6 +700,84 @@ def plan_target(planner, name, xyz, quat, start_state=None, raise_on_failure=Tru
     return trajectory, summary
 
 
+def quat_angle_deg(a, b):
+    qa = np.asarray(a, dtype=float)
+    qb = np.asarray(b, dtype=float)
+    qa /= np.linalg.norm(qa)
+    qb /= np.linalg.norm(qb)
+    dot = abs(float(np.dot(qa, qb)))
+    dot = max(-1.0, min(1.0, dot))
+    return math.degrees(2.0 * math.acos(dot))
+
+
+def fk_pose_for_state(planner, state):
+    rospy.wait_for_service("/compute_fk", timeout=5.0)
+    service = rospy.ServiceProxy("/compute_fk", GetPositionFK)
+    req = GetPositionFKRequest()
+    req.header.frame_id = planner.get_planning_frame()
+    req.fk_link_names = [TCP_LINK]
+    req.robot_state = state
+    resp = service(req)
+    if resp.error_code.val != MoveItErrorCodes.SUCCESS or not resp.pose_stamped:
+        raise RuntimeError("FK failed for final trajectory state: " + moveit_error_summary(resp.error_code))
+    return resp.pose_stamped[0].pose
+
+
+def verify_final_plan_state(planner, trajectory, target_pose, ik_solution):
+    final_state = start_state_from_trajectory(trajectory)
+    if final_state is None:
+        return {{"success": False, "error": "missing final trajectory state"}}
+    fk_pose = fk_pose_for_state(planner, final_state)
+    target_xyz = np.asarray([target_pose.position.x, target_pose.position.y, target_pose.position.z], dtype=float)
+    actual_xyz = np.asarray([fk_pose.position.x, fk_pose.position.y, fk_pose.position.z], dtype=float)
+    target_quat = [target_pose.orientation.x, target_pose.orientation.y, target_pose.orientation.z, target_pose.orientation.w]
+    actual_quat = [fk_pose.orientation.x, fk_pose.orientation.y, fk_pose.orientation.z, fk_pose.orientation.w]
+    try:
+        rospy.wait_for_service("/check_state_validity", timeout=2.0)
+        service = rospy.ServiceProxy("/check_state_validity", GetStateValidity)
+        req = GetStateValidityRequest()
+        req.robot_state = final_state
+        req.group_name = "arm"
+        resp = service(req)
+        validity = {{"available": True, "valid": bool(resp.valid), "contacts": len(getattr(resp, "contacts", []))}}
+    except Exception as exc:
+        validity = {{"available": False, "valid": None, "error": str(exc)}}
+    position_error = float(np.linalg.norm(actual_xyz - target_xyz))
+    orientation_error = quat_angle_deg(target_quat, actual_quat)
+    return {{
+        "success": bool(position_error <= 0.005 and orientation_error <= 5.0 and validity.get("valid") is not False),
+        "target_tcp_link": TCP_LINK,
+        "position_error_m": position_error,
+        "orientation_error_deg": orientation_error,
+        "fk_pose": pose_to_dict(fk_pose),
+        "state_validity": validity,
+        "ik_solution": ik_solution,
+    }}
+
+
+def plan_joint_solution(planner, name, pose, ik_result, raise_on_failure=True):
+    solution = ik_result.get("solution") or {{}}
+    joints = solution.get("joint_positions")
+    if not joints:
+        return None, {{
+            "success": False,
+            "error": "missing IK joint solution",
+            "points": 0,
+        }}
+    planner.clear_pose_targets()
+    planner.set_joint_value_target([float(x) for x in joints])
+    trajectory, summary = summarize_plan(name, planner.plan(), raise_on_failure=raise_on_failure)
+    summary["final_requested_pose"] = pose_to_dict(pose)
+    summary["target_source"] = "validated_ik_joint_solution"
+    verification = verify_final_plan_state(planner, trajectory, pose, solution)
+    summary["final_state_verification"] = verification
+    print("SELECTED_IK_SOLUTION_JSON " + json.dumps(verification, sort_keys=True), flush=True)
+    print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(summary, sort_keys=True))
+    if raise_on_failure and not verification.get("success"):
+        raise RuntimeError("Final planned TCP state failed validation")
+    return trajectory, summary
+
+
 def tcp_height_plan(source_z, hover_height, minimum_link6_transit_z, candidate):
     rot = quat_to_rot_xyzw(candidate["quat"])
     world_link6_to_tcp = rot.dot(np.asarray(LINK6_TO_TCP_TRANSLATION, dtype=float))
@@ -733,6 +851,29 @@ def point_in_box(point, min_xyz, max_xyz):
     return all(float(min_xyz[i]) <= float(point[i]) <= float(max_xyz[i]) for i in range(3))
 
 
+def select_validated_voxel(region, point, usage):
+    voxels = region.get("validated_voxels") or []
+    rows = []
+    for voxel in voxels:
+        if usage not in (voxel.get("usage") or []):
+            continue
+        bounds = voxel.get("source_surface_bounds") or {{}}
+        min_xyz = finite_vec("voxel.min", bounds.get("min"), 3)
+        max_xyz = finite_vec("voxel.max", bounds.get("max"), 3)
+        center = finite_vec("voxel.source_surface_xyz", voxel.get("source_surface_xyz"), 3)
+        inside = point_in_box(point, min_xyz, max_xyz)
+        rows.append({{
+            "voxel": voxel,
+            "inside": inside,
+            "displacement": vec_distance(point, center),
+            "surface_center": center,
+            "surface_min": min_xyz,
+            "surface_max": max_xyz,
+        }})
+    rows.sort(key=lambda row: (not row["inside"], row["displacement"]))
+    return rows[0] if rows else None
+
+
 def select_validated_grasp_region(source_base):
     regions = load_validated_grasp_regions()
     if not regions:
@@ -772,7 +913,12 @@ def select_validated_grasp_region(source_base):
     rows.sort(key=lambda row: (not row["inside"], row["displacement"]))
     selected = rows[0]
     region = selected["region"]
-    quat = finite_vec("region.representative_tcp_quaternion", region.get("representative_tcp_quaternion"), 4)
+    voxel_row = select_validated_voxel(region, point, "source_pick")
+    voxel = voxel_row["voxel"] if voxel_row else None
+    voxel_inside = bool(voxel_row and voxel_row["inside"])
+    selected_source = voxel if voxel_inside else region
+    quat_key = "tcp_quaternion" if voxel_inside else "representative_tcp_quaternion"
+    quat = finite_vec("region.tcp_quaternion", selected_source.get(quat_key), 4)
     rot = quat_to_rot_xyzw(quat)
     approach = rot.dot(unit_vec("tcp_local_approach_axis", TCP_LOCAL_APPROACH_AXIS))
     closing = rot.dot(unit_vec("tcp_local_closing_axis", TCP_LOCAL_CLOSING_AXIS))
@@ -783,22 +929,39 @@ def select_validated_grasp_region(source_base):
         "enabled": True,
         "detected_source_xyz": point,
         "selected_region": region.get("name"),
+        "selected_voxel": voxel.get("voxel_id") if voxel else None,
         "source_inside_region": bool(selected["inside"]),
+        "source_inside_validated_voxel": voxel_inside,
+        "region_execution_validated": bool(region.get("execution_validated", False)),
+        "validation_scope": region.get("validation_scope"),
         "nearest_region_displacement": float(selected["displacement"]),
+        "nearest_voxel_displacement": float(voxel_row["displacement"]) if voxel_row else None,
         "hover_height_key": selected["hover_height_key"],
         "selected_tcp_orientation": quat,
         "approach_angle": float(approach_angle),
-        "selected_seed_joint_state": region.get("representative_joint_state"),
+        "selected_seed_joint_state": selected_source.get("preferred_ik_seed") or region.get("representative_joint_state"),
+        "selected_ik_solution": selected_source.get("actual_ik_solution"),
         "region_surface_center": selected["surface_center"],
         "region_surface_min": selected["surface_min"],
         "region_surface_max": selected["surface_max"],
+        "validated_hover_height_m": selected_source.get("validated_hover_height_m"),
         "transit_result": None,
         "descend_fraction": None,
         "lift_fraction": None,
     }}
-    if CONFIG.get("execute") and not selected["inside"]:
+    requested_hover = float(CONFIG.get("hover_height", 0.10))
+    validated_hover = selected_source.get("validated_hover_height_m")
+    if validated_hover is not None and abs(float(validated_hover) - requested_hover) > 1e-6:
+        selection["hover_height_mismatch"] = {{
+            "requested": requested_hover,
+            "validated": float(validated_hover),
+        }}
+        if CONFIG.get("execute"):
+            print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True), flush=True)
+            raise RuntimeError("Execute refused: requested hover height does not match validated voxel height")
+    if CONFIG.get("execute") and not voxel_inside:
         print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
-        raise RuntimeError("Execute refused: detected source is outside all validated grasp regions")
+        raise RuntimeError("Execute refused: detected source is outside all individually validated grasp voxels")
     if approach_angle > max_allowed + 1e-6:
         print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
         raise RuntimeError("Validated region approach angle %.3f exceeds max %.3f" % (approach_angle, max_allowed))
@@ -806,6 +969,7 @@ def select_validated_grasp_region(source_base):
     candidate = {{
         "phase": "validated_region",
         "region_name": region.get("name"),
+        "voxel_id": voxel.get("voxel_id") if voxel else None,
         "yaw_rad": math.radians(float(region.get("closing_axis_yaw_range_deg", [0.0, 0.0])[0])),
         "yaw_deg": float(region.get("closing_axis_yaw_range_deg", [0.0, 0.0])[0]),
         "tilt_deg": float(approach_angle),
@@ -814,7 +978,8 @@ def select_validated_grasp_region(source_base):
         "approach_axis": [float(x) for x in approach.tolist()],
         "target_closing_axis": [float(x) for x in closing.tolist()],
         "approach_angle_deg": float(approach_angle),
-        "seed_joint_state": region.get("representative_joint_state"),
+        "seed_joint_state": selected_source.get("preferred_ik_seed") or region.get("representative_joint_state"),
+        "preferred_ik_solution": selected_source.get("actual_ik_solution"),
         "validated_region_selection": selection,
     }}
     return candidate, selection
@@ -856,11 +1021,14 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
         }},
     }}, sort_keys=True))
 
-    for phase_name, phase_candidates in [
+    phase_sequence = [
         ("validated_region", validated_candidates),
         ("exact_top_down", exact_candidates),
         ("tilted", tilted_candidates),
-    ]:
+    ]
+    if CONFIG.get("execute") and validated_candidates:
+        phase_sequence = [("validated_region", validated_candidates)]
+    for phase_name, phase_candidates in phase_sequence:
         phase_had_ik_success = False
         if phase_name == "tilted":
             print("TCP_TILTED_CANDIDATES_START no exact top-down candidate produced a valid planned trajectory")
@@ -874,7 +1042,7 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             reachability = reachability_diagnostic(xyz, candidate, height_plan["world_link6_to_tcp_translation"])
             print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
             print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
-            ik_result = check_pose_ik(planner, hover_pose)
+            ik_result = check_pose_ik(planner, hover_pose, candidate.get("seed_joint_state"))
             print("TCP_IK_CANDIDATE_JSON " + json.dumps({{
                 "index": index,
                 "phase": phase_name,
@@ -888,13 +1056,22 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             }}, sort_keys=True))
             phase_had_ik_success = phase_had_ik_success or bool(ik_result.get("success"))
             planner.set_start_state_to_current_state()
-            trajectory, summary = plan_target(
-                planner,
-                "transit_to_source_hover_yaw_%d" % index,
-                xyz,
-                quat,
-                raise_on_failure=False,
-            )
+            if candidate.get("phase") == "validated_region" and ik_result.get("success"):
+                trajectory, summary = plan_joint_solution(
+                    planner,
+                    "transit_to_source_hover_yaw_%d" % index,
+                    hover_pose,
+                    ik_result,
+                    raise_on_failure=False,
+                )
+            else:
+                trajectory, summary = plan_target(
+                    planner,
+                    "transit_to_source_hover_yaw_%d" % index,
+                    xyz,
+                    quat,
+                    raise_on_failure=False,
+                )
             row = {{
                 "index": index,
                 "phase": phase_name,
@@ -1029,6 +1206,101 @@ def base_to_camera_point(base_xyz):
     return transform_point(grasp._camera_frame_id, grasp._base_frame_id, base_xyz)
 
 
+def topic_publishers(topic):
+    try:
+        _code, _message, state = rospy.get_master().getSystemState()
+        for name, nodes in state[0]:
+            if name == topic:
+                return list(nodes)
+    except Exception:
+        pass
+    return []
+
+
+def wait_fresh_message(topic, msg_type, timeout_s=5.0, max_age_s=2.0):
+    publishers = topic_publishers(topic)
+    try:
+        msg = rospy.wait_for_message(topic, msg_type, timeout=timeout_s)
+    except Exception as exc:
+        return {{
+            "ok": False,
+            "topic": topic,
+            "error": str(exc),
+            "publishers": publishers,
+            "publisher_count": len(publishers),
+            "age_s": None,
+        }}
+    stamp = getattr(getattr(msg, "header", None), "stamp", None)
+    stamp_s = float(stamp.to_sec()) if stamp is not None else 0.0
+    age = float((rospy.Time.now() - stamp).to_sec()) if stamp_s > 0.0 else None
+    ok = bool(stamp_s > 0.0 and age is not None and age <= max_age_s)
+    return {{
+        "ok": ok,
+        "topic": topic,
+        "publishers": publishers,
+        "publisher_count": len(publishers),
+        "stamp": stamp_s,
+        "age_s": age,
+        "error": None if ok else ("missing or zero timestamp" if stamp_s <= 0.0 else "stale image"),
+    }}
+
+
+def check_camera_tf(camera_frame, base_frame, timeout_s=5.0):
+    buffer = tf2_ros.Buffer()
+    _listener = tf2_ros.TransformListener(buffer)
+    deadline = time.time() + timeout_s
+    last_error = None
+    while time.time() < deadline and not rospy.is_shutdown():
+        try:
+            tf = buffer.lookup_transform(base_frame, camera_frame, rospy.Time(0), rospy.Duration(0.25))
+            stamp = float(tf.header.stamp.to_sec())
+            age = float((rospy.Time.now() - tf.header.stamp).to_sec()) if stamp > 0.0 else None
+            return {{
+                "ok": True,
+                "source_frame": camera_frame,
+                "target_frame": base_frame,
+                "stamp": stamp,
+                "age_s": age,
+                "error": None,
+            }}
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(0.05)
+    return {{
+        "ok": False,
+        "source_frame": camera_frame,
+        "target_frame": base_frame,
+        "error": last_error,
+    }}
+
+
+def perception_preflight():
+    section("PERCEPTION PREFLIGHT")
+    checks = {{
+        "color": wait_fresh_message(grasp._image_topic, RosImage),
+        "depth": wait_fresh_message(grasp._depth_topic, RosImage),
+        "camera_info": wait_fresh_message(grasp._camera_info_topic, CameraInfo),
+        "tf": check_camera_tf(grasp._camera_frame_id, grasp._base_frame_id),
+        "configured_topics": {{
+            "color": grasp._image_topic,
+            "depth": grasp._depth_topic,
+            "camera_info": grasp._camera_info_topic,
+            "camera_frame": grasp._camera_frame_id,
+            "base_frame": grasp._base_frame_id,
+        }},
+        "tmux_camera_window_status": "not_checked_from_submitted_code",
+    }}
+    print("PERCEPTION_PREFLIGHT_JSON " + json.dumps(checks, sort_keys=True), flush=True)
+    failed = [name for name, value in checks.items() if isinstance(value, dict) and value.get("ok") is False]
+    if failed:
+        raise RuntimeError("PERCEPTION_PREFLIGHT_FAILED " + json.dumps({{
+            "failed": failed,
+            "checks": checks,
+        }}, sort_keys=True))
+    grasp.start()
+    return checks
+
+
 def normalize_source(provider, label, camera_xyz, base_xyz, width_m, confidence, metadata):
     camera = finite_vec("source.camera_xyz", camera_xyz, 3)
     base = finite_vec("source.base_xyz", base_xyz, 3)
@@ -1051,6 +1323,7 @@ def normalize_source(provider, label, camera_xyz, base_xyz, width_m, confidence,
 
 
 def source_from_perception(source):
+    perception_preflight()
     results = grasp.get_grasp_pose(source, top_k=CONFIG["top_k"])
     instances = [r for r in results if r.get("grasps")]
     if not instances:
@@ -1209,6 +1482,7 @@ def visual_verify(source_base, destination_base):
     return out
 
 
+clear_display_trajectory()
 print("PIPER_MANIPULATION_TASK " + json.dumps(CONFIG, sort_keys=True))
 print("MOTION_PROFILE_JSON " + json.dumps({{
     "velocity_scaling": CONFIG["velocity_scaling"],
@@ -1218,6 +1492,9 @@ print("MOTION_PROFILE_JSON " + json.dumps({{
 
 if not hasattr(env, "_ensure_piper_enabled"):
     raise RuntimeError("PiperRobotEnv missing enable preflight helper")
+
+if CONFIG["task"] == "place" and CONFIG["execute"]:
+    raise RuntimeError("PLACE_EXECUTION_DISABLED destination has no fully validated place region")
 
 if CONFIG["destination_perception_only"]:
     if not CONFIG["destination"]:
@@ -1234,6 +1511,7 @@ current_pose = env.get_robot_end_pose()
 if current_pose is None:
     raise RuntimeError("No current end-effector pose from /end_pose")
 
+section("SOURCE DETECTION")
 source_detection = select_source()
 source_camera = source_detection["camera_xyz"]
 source_base = source_detection["base_xyz"]
@@ -1271,6 +1549,7 @@ if CONFIG["perception_only"]:
     print("PERCEPTION_ONLY_COMPLETE")
     raise SystemExit(0)
 
+section("MOTION PLANNING")
 grasp_z = source_base[2] + float(CONFIG["grasp_z_offset"])
 
 planner = MoveGroupCommander("arm")
@@ -1282,8 +1561,8 @@ if selected_tcp_link != TCP_LINK:
 planner.set_max_velocity_scaling_factor(float(CONFIG["velocity_scaling"]))
 planner.set_max_acceleration_scaling_factor(float(CONFIG["acceleration_scaling"]))
 planner.set_start_state_to_current_state()
-planner.set_planning_time(5.0)
-planner.set_num_planning_attempts(5)
+planner.set_planning_time(10.0)
+planner.set_num_planning_attempts(20)
 planner.set_goal_position_tolerance(0.005)
 planner.set_goal_orientation_tolerance(math.radians(5.0))
 
@@ -1443,6 +1722,7 @@ print("MOVEIT_PLAN_JSON " + json.dumps(summaries, sort_keys=True))
 if CONFIG["plan_only"]:
     print("PLAN_ONLY_COMPLETE no robot movement commanded")
 else:
+    section("EXECUTION")
     env._ensure_piper_enabled()
     print("EXECUTION_START")
     print("EXEC_STEP open_gripper")
@@ -1497,7 +1777,7 @@ def release_lease(agent_url: str, lease_id: str) -> None:
         print(f"LEASE_RELEASE_FAILED {exc}", file=sys.stderr)
 
 
-def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float) -> int:
+def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, verbose_result: bool = False) -> int:
     base = agent_url.rstrip("/")
     validation = http_json("POST", base + "/code/validate", {"code": code})
     if not validation.get("valid"):
@@ -1535,10 +1815,47 @@ def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float) 
         print("FINAL_STATUS " + result_status)
         if status == "idle" and result_status == "completed":
             return 0
-        print("FINAL_RESULT " + json.dumps(final, indent=2, sort_keys=True))
+        result_path = save_full_result(final, result.get("execution_id") or started.get("execution_id", "unknown"))
+        print_failure_summary(final, result_path)
+        if verbose_result:
+            print("FINAL_RESULT " + json.dumps(final, indent=2, sort_keys=True))
         return 1
     print("FINAL_STATUS " + status)
     return 0
+
+
+def save_full_result(final: Dict[str, Any], execution_id: str) -> str:
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "code_results")
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, f"{int(time.time())}_{execution_id}.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(final, handle, indent=2, sort_keys=True)
+    return path
+
+
+def print_failure_summary(final: Dict[str, Any], result_path: str) -> None:
+    result = final.get("result") or {}
+    stderr = str(result.get("stderr") or "")
+    traceback_lines = [line for line in stderr.splitlines() if line.strip()]
+    exception_type = None
+    exception_message = result.get("error") or ""
+    for line in reversed(traceback_lines):
+        if ":" in line and not line.startswith(" "):
+            exception_type, exception_message = line.split(":", 1)
+            exception_message = exception_message.strip()
+            break
+    summary = {
+        "status": result.get("status"),
+        "exit_code": result.get("exit_code"),
+        "execution_id": result.get("execution_id"),
+        "duration": result.get("duration"),
+        "exception_type": exception_type,
+        "exception_message": exception_message,
+        "last_traceback_lines": traceback_lines[-8:],
+    }
+    print("FINAL_ERROR_SUMMARY_JSON")
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    print("FULL_RESULT_SAVED " + result_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1564,6 +1881,7 @@ def parse_args() -> argparse.Namespace:
         default="/home/dase-hw101/ABot-Claw/robot_layer/arm_piper/agent_server/config/piper_validated_grasp_regions.yaml",
     )
     parser.add_argument("--max-grasp-tilt", type=float, default=25.0)
+    parser.add_argument("--visualize-candidates", action="store_true")
     parser.add_argument("--aruco-frame", default="aruco_marker_frame")
     parser.add_argument("--aruco-offset-x", type=float, default=0.0)
     parser.add_argument("--aruco-offset-y", type=float, default=0.0)
@@ -1579,6 +1897,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grasp-z-offset", type=float, default=0.035)
     parser.add_argument("--place-z-offset", type=float, default=0.045)
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--verbose-result", action="store_true")
     parser.add_argument("--x-min", type=float, default=0.05)
     parser.add_argument("--x-max", type=float, default=0.60)
     parser.add_argument("--y-min", type=float, default=-0.35)
@@ -1623,7 +1942,7 @@ def main() -> int:
     try:
         lease_id = acquire_lease(args.agent_url, args.holder)
         print("LEASE_ACQUIRED " + lease_id)
-        return submit_and_stream(args.agent_url, lease_id, code, args.timeout)
+        return submit_and_stream(args.agent_url, lease_id, code, args.timeout, args.verbose_result)
     finally:
         if lease_id:
             release_lease(args.agent_url, lease_id)

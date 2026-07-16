@@ -145,7 +145,7 @@ class YoloSDK:
         with self._lock:
             if self._last_color_bgr is None:
                 raise RuntimeError(
-                    f"等待 ROS 图像超时 ({self._timeout}s): {self._image_topic}"
+                    f"Timed out waiting for ROS image after {self._timeout}s: {self._image_topic}"
                 )
 
         self._started = True
@@ -209,7 +209,7 @@ class YoloSDK:
         with self._lock:
             img = None if self._last_color_bgr is None else self._last_color_bgr.copy()
         if img is None:
-            raise RuntimeError(f"尚未收到 ROS 图像: {self._image_topic}")
+            raise RuntimeError(f"No ROS image has been received yet: {self._image_topic}")
         return img
 
     def _encode_image(self, img_bgr: np.ndarray) -> str:
@@ -339,9 +339,9 @@ class YoloSDK:
             depth_map = None if self._last_depth is None else self._last_depth.copy()
             K = None if self._camera_K is None else self._camera_K.copy()
         if depth_map is None:
-            raise RuntimeError(f"尚未收到深度图: {self._depth_topic}")
+            raise RuntimeError(f"No ROS depth image has been received yet: {self._depth_topic}")
         if K is None:
-            raise RuntimeError(f"尚未收到相机内参: {self._camera_info_topic}")
+            raise RuntimeError(f"No ROS camera intrinsics have been received yet: {self._camera_info_topic}")
 
         out: List[Dict] = []
         for det in matched:
