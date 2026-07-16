@@ -259,6 +259,7 @@ TCP_LOCAL_APPROACH_AXIS = [0.0, 0.0, 1.0]
 TCP_LOCAL_CLOSING_AXIS = [0.0, 1.0, 0.0]
 TARGET_APPROACH_AXIS = [0.0, 0.0, -1.0]
 TARGET_CLOSING_AXIS = [0.0, 1.0, 0.0]
+CLEAR_DISPLAY_ON_EXIT = True
 
 
 def section(title):
@@ -277,7 +278,35 @@ def clear_display_trajectory():
         print("DISPLAY_TRAJECTORY_CLEAR_FAILED " + str(exc), flush=True)
 
 
-atexit.register(clear_display_trajectory)
+def clear_display_trajectory_on_exit():
+    if CLEAR_DISPLAY_ON_EXIT:
+        clear_display_trajectory()
+
+
+def publish_rviz_preview(planner, ordered_trajectories):
+    global CLEAR_DISPLAY_ON_EXIT
+    try:
+        msg = DisplayTrajectory()
+        msg.model_id = "piper"
+        msg.trajectory_start = planner.get_current_state()
+        msg.trajectory = [trajectory for trajectory in ordered_trajectories if trajectory is not None]
+        pub = rospy.Publisher("/move_group/display_planned_path", DisplayTrajectory, queue_size=1, latch=True)
+        deadline = time.time() + 1.0
+        while pub.get_num_connections() == 0 and time.time() < deadline and not rospy.is_shutdown():
+            time.sleep(0.05)
+        pub.publish(msg)
+        CLEAR_DISPLAY_ON_EXIT = False
+        print("RVIZ_PREVIEW_DISPLAYED_JSON " + json.dumps({{
+            "topic": "/move_group/display_planned_path",
+            "trajectory_count": len(msg.trajectory),
+            "loop_animation_expected": False,
+            "cleared_at_next_request": True,
+        }}, sort_keys=True), flush=True)
+    except Exception as exc:
+        print("RVIZ_PREVIEW_DISPLAY_FAILED " + str(exc), flush=True)
+
+
+atexit.register(clear_display_trajectory_on_exit)
 
 
 def finite_vec(name, values, n):
@@ -2016,6 +2045,15 @@ if CONFIG["task"] == "place":
 print("MOVEIT_PLAN_JSON " + json.dumps(summaries, sort_keys=True))
 
 if CONFIG["plan_only"]:
+    preview_order = [
+        "transit_to_source_hover",
+        "source_descend",
+        "source_lift",
+        "transport_to_destination_hover",
+        "destination_descend",
+        "destination_rise",
+    ]
+    publish_rviz_preview(planner, [plans[name] for name in preview_order if name in plans])
     print("PLAN_ONLY_COMPLETE no robot movement commanded")
 else:
     section("EXECUTION")
