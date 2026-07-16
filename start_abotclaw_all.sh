@@ -14,6 +14,11 @@ USE_FAKE_DEPTH=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if [[ "${1:-}" != "--lower-only" ]]; then
+    exec "${SCRIPT_DIR}/start_abotclaw_full_stack.sh" "$@"
+fi
+shift
+
 usage() {
     cat <<'EOF'
 Usage: ./start_abotclaw_all.sh [--restart] [--use-fake-depth] [--no-attach|--detach]

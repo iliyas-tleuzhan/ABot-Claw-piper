@@ -17,6 +17,11 @@ import yaml
 TERMINAL_STATUSES = {"completed", "failed", "timeout", "stopped", "idle"}
 VALIDATED_REGION_SCHEMA_VERSION = 1
 HEARTBEAT_INTERVAL_S = 20.0
+DEFAULT_SATURATED_CLOSE_WIDTH_BY_SOURCE = {
+    "cup": 0.035,
+    "bottle": 0.035,
+    "test-object": 0.035,
+}
 
 
 def compute_gripper_plan_values(
@@ -25,6 +30,7 @@ def compute_gripper_plan_values(
     gripper_max: float,
     close_width_override: Optional[float],
     execute: bool,
+    source_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     detected = float(detected_width)
     gripper_min = float(gripper_min)
@@ -34,7 +40,12 @@ def compute_gripper_plan_values(
 
     if close_width_override is None:
         source = "automatic"
-        close_width = None if saturated else max(gripper_min, detected - 0.005)
+        profile_width = DEFAULT_SATURATED_CLOSE_WIDTH_BY_SOURCE.get(str(source_label or "").lower())
+        if saturated and profile_width is not None:
+            source = "object_profile"
+            close_width = max(gripper_min, min(gripper_max, float(profile_width)))
+        else:
+            close_width = None if saturated else max(gripper_min, detected - 0.005)
     else:
         source = "explicit"
         close_width = float(close_width_override)
@@ -51,7 +62,7 @@ def compute_gripper_plan_values(
                 % (close_width, open_width)
             )
 
-    if execute and saturated and close_width_override is None:
+    if execute and saturated and close_width_override is None and close_width is None:
         raise ValueError(
             "Detected grasp width %.4f m is saturated at gripper max %.4f m; "
             "execute mode requires explicit --close-width"
@@ -65,6 +76,7 @@ def compute_gripper_plan_values(
         "close_width_m": close_width,
         "close_width_source": source,
         "grip_margin_m": None if close_width is None else detected - close_width,
+        "source_label": source_label,
     }
 
 
@@ -202,6 +214,7 @@ def build_robot_code(args: argparse.Namespace) -> str:
         "source_provider": args.source_provider,
         "source_width": args.source_width,
         "close_width": args.close_width,
+        "saturated_close_width_by_source": DEFAULT_SATURATED_CLOSE_WIDTH_BY_SOURCE,
         "source_xyz": [args.source_x, args.source_y, args.source_z],
         "grasp_region": args.grasp_region,
         "grasp_region_config": args.grasp_region_config,
@@ -236,11 +249,13 @@ import xml.etree.ElementTree as ET
 import atexit
 import copy
 
+import actionlib
 import cv2
 import numpy as np
 import rospy
 import tf2_ros
 import yaml
+from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryGoal
 from geometry_msgs.msg import Point, Pose, PoseStamped
 from sensor_msgs.msg import CameraInfo, Image as RosImage
 from moveit_commander import MoveGroupCommander
@@ -260,6 +275,7 @@ TCP_LOCAL_CLOSING_AXIS = [0.0, 1.0, 0.0]
 TARGET_APPROACH_AXIS = [0.0, 0.0, -1.0]
 TARGET_CLOSING_AXIS = [0.0, 1.0, 0.0]
 CLEAR_DISPLAY_ON_EXIT = True
+EXECUTION_JOINT_POSITION_LIMITS = {{}}
 
 
 def section(title):
@@ -411,8 +427,12 @@ def compute_top_down_tcp_orientation(closing_target_axis=None):
 def top_down_orientation_candidates(current_tcp_pose):
     candidates = []
     exact_yaw_degrees = [0.0, 45.0, 90.0, 135.0, 180.0, -45.0, -90.0, -135.0]
-    max_tilt = float(CONFIG.get("max_grasp_tilt", 25.0))
-    tilt_degrees = [value for value in [5.0, 10.0, 15.0, 20.0, 25.0] if value <= max_tilt + 1e-9]
+    max_tilt = float(CONFIG.get("max_grasp_tilt", 45.0))
+    tilt_degrees = [
+        value
+        for value in [45.0, 40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0]
+        if value <= max_tilt + 1e-9
+    ]
 
     for yaw_deg in exact_yaw_degrees:
         yaw = math.radians(yaw_deg)
@@ -430,13 +450,13 @@ def top_down_orientation_candidates(current_tcp_pose):
             "approach_angle_deg": angle,
         }})
 
-    for yaw_deg in [0.0]:
-        yaw = math.radians(yaw_deg)
-        closing = [math.cos(yaw), math.sin(yaw), 0.0]
-        closing_vec = unit_vec("candidate_closing_axis", closing)
-        lateral_vec = np.cross(closing_vec, np.array([0.0, 0.0, -1.0], dtype=float))
-        lateral_vec /= np.linalg.norm(lateral_vec)
-        for tilt_deg in tilt_degrees:
+    for tilt_deg in tilt_degrees:
+        for yaw_deg in exact_yaw_degrees:
+            yaw = math.radians(yaw_deg)
+            closing = [math.cos(yaw), math.sin(yaw), 0.0]
+            closing_vec = unit_vec("candidate_closing_axis", closing)
+            lateral_vec = np.cross(closing_vec, np.array([0.0, 0.0, -1.0], dtype=float))
+            lateral_vec /= np.linalg.norm(lateral_vec)
             tilt_rad = math.radians(abs(tilt_deg))
             tilt_sign = 1.0 if tilt_deg >= 0.0 else -1.0
             approach = np.array([0.0, 0.0, -math.cos(tilt_rad)], dtype=float) + lateral_vec * (tilt_sign * math.sin(tilt_rad))
@@ -455,6 +475,84 @@ def top_down_orientation_candidates(current_tcp_pose):
                 "target_closing_axis": closing_axis,
                 "approach_angle_deg": angle,
             }})
+    return candidates
+
+
+def fk_workspace_orientation_candidates():
+    # Read-only FK sweep results generated after loading the observed joint5
+    # physical upper limit into MoveIt. These are orientation/seed hints only;
+    # every live target is still planned and collision-checked by MoveIt.
+    samples = [
+        {{
+            "rank": 1,
+            "joint_positions": [-0.944838501, 1.544129791, -1.10814839, 0.04976221642, 0.8277504641, -1.116302965],
+            "tcp_quaternion": [-0.0710700392, 0.9778342326, -0.1569822379, 0.118936286],
+            "approach_axis": [0.2549134115, -0.2900995993, -0.9224214737],
+            "closing_axis": [-0.1016476658, 0.940611253, -0.3239108254],
+            "approach_angle_to_down_deg": 22.71730779,
+            "minimum_joint_limit_margin_rad": 0.1222495359,
+        }},
+        {{
+            "rank": 2,
+            "joint_positions": [0.8904299927, 1.371041339, -0.9786067968, -0.2650079049, 0.8433129257, 1.423728098],
+            "tcp_quaternion": [0.1924713931, 0.9521578966, 0.1440084227, 0.1887105639],
+            "approach_axis": [0.4147995107, 0.2015947435, -0.8872997945],
+            "closing_axis": [0.3121744923, 0.884432674, 0.3468802841],
+            "approach_angle_to_down_deg": 27.46412284,
+            "minimum_joint_limit_margin_rad": 0.1066870743,
+        }},
+        {{
+            "rank": 3,
+            "joint_positions": [-0.6612910767, 1.641973954, -1.146429811, 0.2263253831, 0.683848222, 0.8548280178],
+            "tcp_quaternion": [0.7131235617, 0.654125464, 0.1123844282, 0.2257086691],
+            "approach_axis": [0.4555715432, -0.1748893075, -0.872850674],
+            "closing_axis": [0.8822122821, -0.04235094803, 0.4689433725],
+            "approach_angle_to_down_deg": 29.20838473,
+            "minimum_joint_limit_margin_rad": 0.266151778,
+        }},
+        {{
+            "rank": 4,
+            "joint_positions": [-0.1028248901, 1.160197802, -0.6829511808, -0.3927136227, 0.7832862882, -0.6675186788],
+            "tcp_quaternion": [-0.371931114, 0.8932234156, -0.2231151877, 0.1184853971],
+            "approach_axis": [0.3776348228, -0.3104466087, -0.8723616474],
+            "closing_axis": [-0.6115633768, 0.6237737188, -0.4867202316],
+            "approach_angle_to_down_deg": 29.26575117,
+            "minimum_joint_limit_margin_rad": 0.1667137118,
+        }},
+        {{
+            "rank": 5,
+            "joint_positions": [0.7859273071, 1.203430033, -0.7644131328, 0.1835194944, 0.7171963539, 1.209015616],
+            "tcp_quaternion": [0.2533288398, 0.9322051965, 0.2486381267, 0.07068983338],
+            "approach_axis": [0.2577692763, 0.4277479605, -0.8663640588],
+            "closing_axis": [0.4371565462, 0.7480071618, 0.4993790544],
+            "approach_angle_to_down_deg": 29.9611702,
+            "minimum_joint_limit_margin_rad": 0.2328036461,
+        }},
+    ]
+    max_tilt = float(CONFIG.get("max_grasp_tilt", 45.0))
+    candidates = []
+    for sample in samples:
+        angle = float(sample["approach_angle_to_down_deg"])
+        if angle > max_tilt + 1e-9:
+            continue
+        quat = finite_vec("fk_workspace.tcp_quaternion", sample["tcp_quaternion"], 4)
+        rot = quat_to_rot_xyzw(quat)
+        approach = rot.dot(unit_vec("tcp_local_approach_axis", TCP_LOCAL_APPROACH_AXIS))
+        closing = rot.dot(unit_vec("tcp_local_closing_axis", TCP_LOCAL_CLOSING_AXIS))
+        candidates.append({{
+            "phase": "fk_workspace",
+            "rank": int(sample["rank"]),
+            "yaw_rad": None,
+            "yaw_deg": None,
+            "tilt_deg": float(angle),
+            "closing_axis": [float(x) for x in sample["closing_axis"]],
+            "quat": quat,
+            "approach_axis": [float(x) for x in approach.tolist()],
+            "target_closing_axis": [float(x) for x in closing.tolist()],
+            "approach_angle_deg": float(angle),
+            "seed_joint_state": [float(x) for x in sample["joint_positions"]],
+            "minimum_joint_limit_margin_rad": float(sample["minimum_joint_limit_margin_rad"]),
+        }})
     return candidates
 
 
@@ -590,6 +688,82 @@ def trajectory_joint_summary(trajectory):
         "first_joint_positions": [float(x) for x in points[0].positions],
         "final_joint_positions": [float(x) for x in points[-1].positions],
     }}
+
+
+def trajectory_joint_position_limit_report(name, trajectory):
+    # Position limits are enforced by the loaded URDF/MoveIt joint_limits.yaml.
+    # This report remains for diagnostics only and must not diverge from the
+    # robot model with a second application-level limit table.
+    jt = getattr(trajectory, "joint_trajectory", None)
+    joint_names = list(getattr(jt, "joint_names", []))
+    points = list(getattr(jt, "points", []))
+    extrema = {{}}
+    violations = []
+    for joint_index, joint_name in enumerate(joint_names):
+        if joint_name not in EXECUTION_JOINT_POSITION_LIMITS:
+            continue
+        values = [
+            float(point.positions[joint_index])
+            for point in points
+            if len(point.positions) > joint_index
+        ]
+        if not values:
+            continue
+        limits = EXECUTION_JOINT_POSITION_LIMITS[joint_name]
+        lower = float(limits["lower"])
+        upper = float(limits["upper"])
+        min_value = min(values)
+        max_value = max(values)
+        extrema[joint_name] = {{
+            "min": min_value,
+            "max": max_value,
+            "lower": lower,
+            "upper": upper,
+        }}
+        if min_value < lower or max_value > upper:
+            violations.append({{
+                "joint": joint_name,
+                "min": min_value,
+                "max": max_value,
+                "lower": lower,
+                "upper": upper,
+            }})
+    return {{
+        "name": name,
+        "checked_limits": EXECUTION_JOINT_POSITION_LIMITS,
+        "joint_extrema": extrema,
+        "violations": violations,
+        "success": not violations,
+    }}
+
+
+def assert_trajectory_execution_joint_limits(name, trajectory):
+    report = trajectory_joint_position_limit_report(name, trajectory)
+    print("EXECUTION_JOINT_LIMIT_CHECK_JSON " + json.dumps(report, sort_keys=True), flush=True)
+    if not report["success"]:
+        raise RuntimeError("Execution refused: trajectory %s exceeds observed physical joint limits" % name)
+
+
+def assert_current_execution_joint_limits(planner):
+    joint_names = list(planner.get_active_joints())
+    positions = [float(x) for x in planner.get_current_joint_values()]
+    jt = type("JointTrajectoryLike", (), {{}})()
+    jt.joint_names = joint_names
+    point = type("PointLike", (), {{}})()
+    point.positions = positions
+    trajectory = type("TrajectoryLike", (), {{}})()
+    trajectory.joint_trajectory = jt
+    jt.points = [point]
+    report = trajectory_joint_position_limit_report("current_state", trajectory)
+    print("CURRENT_EXECUTION_JOINT_LIMIT_CHECK_JSON " + json.dumps(report, sort_keys=True), flush=True)
+    if not report["success"]:
+        raise RuntimeError("Execution refused: current joint state is outside observed physical joint limits")
+
+
+def assert_planned_execution_joint_limits(plans, names):
+    for plan_name in names:
+        if plan_name in plans:
+            assert_trajectory_execution_joint_limits(plan_name, plans[plan_name])
 
 
 def check_current_state_validity(planner):
@@ -893,6 +1067,35 @@ def plan_target(planner, name, xyz, quat, start_state=None, raise_on_failure=Tru
     return trajectory, summary
 
 
+def plan_position_target(planner, name, xyz, start_state=None, raise_on_failure=True):
+    assert_workspace(name, xyz)
+    if start_state is not None:
+        planner.set_start_state(start_state)
+    planner.clear_pose_targets()
+    planner.set_position_target([float(x) for x in xyz], TCP_LINK)
+    plan_started = time.time()
+    result = planner.plan()
+    wall_time = time.time() - plan_started
+    trajectory, summary = summarize_plan(
+        name,
+        result,
+        raise_on_failure=raise_on_failure,
+        planner_wall_time_s=wall_time,
+    )
+    summary["target_source"] = "position_only_tcp_target"
+    summary["final_requested_pose"] = {{"position": [float(x) for x in xyz], "orientation_quat": None}}
+    if summary.get("success") and summary.get("points", 0) > 0:
+        final_state = start_state_from_trajectory(trajectory)
+        if final_state is not None:
+            fk_pose = fk_pose_for_state(planner, final_state)
+            summary["final_tcp_pose"] = pose_to_dict(fk_pose)
+    print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(summary, sort_keys=True))
+    state = start_state_from_trajectory(trajectory)
+    if state is not None:
+        planner.set_start_state(state)
+    return trajectory, summary
+
+
 def quat_angle_deg(a, b):
     qa = np.asarray(a, dtype=float)
     qb = np.asarray(b, dtype=float)
@@ -984,10 +1187,7 @@ def tcp_height_plan(source_z, hover_height, minimum_link6_transit_z, candidate):
     world_link6_to_tcp = rot.dot(np.asarray(LINK6_TO_TCP_TRANSLATION, dtype=float))
     tcp_z_from_object_clearance = float(source_z) + float(hover_height)
     tcp_z_from_link6_clearance = float(minimum_link6_transit_z) + float(world_link6_to_tcp[2])
-    if candidate.get("phase") == "validated_region":
-        selected_tcp_hover_z = tcp_z_from_object_clearance
-    else:
-        selected_tcp_hover_z = max(tcp_z_from_object_clearance, tcp_z_from_link6_clearance)
+    selected_tcp_hover_z = tcp_z_from_object_clearance
     return {{
         "source_surface_z": float(source_z),
         "hover_height": float(hover_height),
@@ -995,7 +1195,8 @@ def tcp_height_plan(source_z, hover_height, minimum_link6_transit_z, candidate):
         "tcp_z_from_object_clearance": tcp_z_from_object_clearance,
         "tcp_z_from_link6_clearance": tcp_z_from_link6_clearance,
         "selected_tcp_hover_z": selected_tcp_hover_z,
-        "validated_region_tcp_height": bool(candidate.get("phase") == "validated_region"),
+        "minimum_link6_transit_z_applied": False,
+        "minimum_link6_transit_z_policy": "diagnostic_only_moveit_collision_checking_is_authoritative",
         "world_link6_to_tcp_translation": [float(x) for x in world_link6_to_tcp.tolist()],
     }}
 
@@ -1011,8 +1212,8 @@ def reachability_diagnostic(tcp_xyz, candidate, world_link6_to_tcp):
         "implied_link6_xyz": [float(x) for x in link6.tolist()],
         "base_to_tcp_distance_m": float(np.linalg.norm(tcp)),
         "base_to_link6_distance_m": float(np.linalg.norm(link6)),
-        "yaw_rad": float(candidate["yaw_rad"]),
-        "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+        "yaw_rad": None if candidate.get("yaw_rad") is None else float(candidate["yaw_rad"]),
+        "tilt_deg": None if candidate.get("tilt_deg") is None else float(candidate.get("tilt_deg", 0.0)),
     }}
 
 
@@ -1239,19 +1440,13 @@ def select_validated_grasp_region(source_base):
             "requested": requested_hover,
             "validated": float(validated_hover),
         }}
-        if CONFIG.get("execute"):
-            print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True), flush=True)
-            raise RuntimeError("Execute refused: requested hover height does not match validated voxel height")
-    if CONFIG.get("execute") and not voxel_inside:
-        print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
-        raise RuntimeError("Execute refused: detected source is outside all individually validated grasp voxels")
     if approach_angle > max_allowed + 1e-6:
         print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
         raise RuntimeError("Validated region approach angle %.3f exceeds max %.3f" % (approach_angle, max_allowed))
     print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
-    if CONFIG.get("grasp_region") == "auto" and not voxel_inside and not CONFIG.get("explore_unvalidated_candidates"):
+    if not voxel_inside:
         print("SOURCE_OUTSIDE_VALIDATED_VOXEL_JSON " + json.dumps(selection, sort_keys=True), flush=True)
-        raise RuntimeError("Detected source is outside all individually validated grasp voxels; rerun with --explore-unvalidated-candidates for diagnostics only")
+        print("VALIDATED_REGION_HINT_ONLY planning will continue against the detected source pose", flush=True)
     candidate = {{
         "phase": "validated_region",
         "region_name": region.get("name"),
@@ -1277,23 +1472,32 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     minimum_link6_transit_z = float(CONFIG["transit_z"])
     candidates = top_down_orientation_candidates(current_tcp_pose)
     validated_candidate, validated_selection = select_validated_grasp_region(source_base)
-    if validated_candidate is not None and (
-        validated_selection.get("source_inside_validated_voxel")
-        or CONFIG.get("explore_unvalidated_candidates")
-    ):
+    if validated_candidate is not None:
         candidates = [validated_candidate] + candidates
     exact_candidates = [candidate for candidate in candidates if candidate["phase"] == "exact_top_down"]
     tilted_candidates = [candidate for candidate in candidates if candidate["phase"] == "tilted"]
     validated_candidates = [candidate for candidate in candidates if candidate["phase"] == "validated_region"]
-    control_candidate = (validated_candidates or exact_candidates)[0]
-    control_height = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, control_candidate)
-    control_xyz = [source_base[0], source_base[1], control_height["selected_tcp_hover_z"]]
+    fk_candidates = fk_workspace_orientation_candidates()
     current_orientation_quat = [
         current_tcp_pose.orientation.x,
         current_tcp_pose.orientation.y,
         current_tcp_pose.orientation.z,
         current_tcp_pose.orientation.w,
     ]
+    position_only_candidates = [{{
+        "phase": "position_only",
+        "yaw_rad": None,
+        "yaw_deg": None,
+        "tilt_deg": None,
+        "closing_axis": None,
+        "quat": current_orientation_quat,
+        "approach_axis": None,
+        "target_closing_axis": None,
+        "approach_angle_deg": None,
+    }}]
+    control_candidate = (validated_candidates or exact_candidates)[0]
+    control_height = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, control_candidate)
+    control_xyz = [source_base[0], source_base[1], control_height["selected_tcp_hover_z"]]
     current_orientation_ik = check_pose_ik(planner, pose_msg(control_xyz, current_orientation_quat))
     exact_top_down_ik = check_pose_ik(planner, pose_msg(control_xyz, control_candidate["quat"]))
     current_orientation_report = {{
@@ -1313,24 +1517,22 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
         "exact_top_down_yaw0": exact_top_down_report,
     }}, sort_keys=True))
 
-    if CONFIG.get("grasp_region") == "auto" and not CONFIG.get("explore_unvalidated_candidates"):
-        phase_sequence = [("validated_region", validated_candidates)]
-    else:
-        phase_sequence = [
-            ("validated_region", validated_candidates),
-            ("exact_top_down", exact_candidates),
-            ("tilted", tilted_candidates),
-        ]
-    if CONFIG.get("execute") and validated_candidates:
-        phase_sequence = [("validated_region", validated_candidates)]
+    phase_sequence = [
+        ("validated_region", validated_candidates),
+        ("fk_workspace", fk_candidates),
+        ("tilted", tilted_candidates),
+        ("exact_top_down", exact_candidates),
+    ]
+    if CONFIG.get("plan_only"):
+        phase_sequence.append(("position_only", position_only_candidates))
     exploratory_started = time.time()
     exploratory_budget = float(CONFIG.get("exploratory_planning_budget_s", 60.0))
     for phase_name, phase_candidates in phase_sequence:
         phase_had_ik_success = False
         if phase_name == "tilted":
-            print("TCP_TILTED_CANDIDATES_START no exact top-down candidate produced a valid planned trajectory")
+            print("TCP_TILTED_CANDIDATES_START searching downward tilted approaches under the loaded MoveIt joint limits")
         for candidate in phase_candidates:
-            if phase_name != "validated_region" and CONFIG.get("explore_unvalidated_candidates"):
+            if phase_name != "validated_region":
                 elapsed = time.time() - exploratory_started
                 if elapsed >= exploratory_budget:
                     print("EXPLORATORY_PLANNING_BUDGET_JSON " + json.dumps({{
@@ -1350,13 +1552,16 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             if CONFIG.get("verbose_diagnostics"):
                 print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
                 print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
-            ik_result = check_pose_ik(planner, hover_pose, candidate.get("seed_joint_state"))
+            if phase_name == "position_only":
+                ik_result = {{"available": False, "success": False, "error": "skipped_for_position_only_target", "seeds": []}}
+            else:
+                ik_result = check_pose_ik(planner, hover_pose, candidate.get("seed_joint_state"))
             ik_report = {{
                 "index": index,
                 "phase": phase_name,
-                "yaw_rad": float(candidate["yaw_rad"]),
-                "yaw_deg": float(candidate["yaw_deg"]),
-                "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+                "yaw_rad": None if candidate.get("yaw_rad") is None else float(candidate["yaw_rad"]),
+                "yaw_deg": None if candidate.get("yaw_deg") is None else float(candidate["yaw_deg"]),
+                "tilt_deg": None if candidate.get("tilt_deg") is None else float(candidate.get("tilt_deg", 0.0)),
                 "success": bool(ik_result.get("success")),
                 "error": ik_result.get("error"),
                 "available": bool(ik_result.get("available")),
@@ -1366,7 +1571,26 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             print("TCP_IK_CANDIDATE_JSON " + json.dumps(ik_report, sort_keys=True))
             phase_had_ik_success = phase_had_ik_success or bool(ik_result.get("success"))
             planner.set_start_state_to_current_state()
-            if candidate.get("phase") == "validated_region" and ik_result.get("success"):
+            if phase_name == "position_only":
+                planner.set_planning_time(5.0)
+                planner.set_num_planning_attempts(10)
+            elif phase_name == "fk_workspace":
+                planner.set_planning_time(5.0)
+                planner.set_num_planning_attempts(10)
+            elif phase_name == "validated_region":
+                planner.set_planning_time(5.0)
+                planner.set_num_planning_attempts(10)
+            else:
+                planner.set_planning_time(3.0)
+                planner.set_num_planning_attempts(6)
+            if phase_name == "position_only":
+                trajectory, summary = plan_position_target(
+                    planner,
+                    "transit_to_source_hover_yaw_%d" % index,
+                    xyz,
+                    raise_on_failure=False,
+                )
+            elif candidate.get("phase") == "validated_region" and ik_result.get("success"):
                 trajectory, summary = plan_joint_solution(
                     planner,
                     "transit_to_source_hover_yaw_%d" % index,
@@ -1385,8 +1609,8 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             row = {{
                 "index": index,
                 "phase": phase_name,
-                "yaw_deg": float(candidate["yaw_deg"]),
-                "tilt_deg": float(candidate.get("tilt_deg", 0.0)),
+                "yaw_deg": None if candidate.get("yaw_deg") is None else float(candidate["yaw_deg"]),
+                "tilt_deg": None if candidate.get("tilt_deg") is None else float(candidate.get("tilt_deg", 0.0)),
                 "ik_success": bool(ik_result.get("success")),
                 "ik_error": ik_result.get("error"),
                 "planner_success": bool(summary.get("success")),
@@ -1396,6 +1620,36 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             rows.append(row)
             print("TCP_CANDIDATE_RESULT_JSON " + json.dumps(row, sort_keys=True))
             if summary.get("success") and summary.get("points", 0) > 0:
+                planner.set_planning_time(10.0)
+                planner.set_num_planning_attempts(20)
+                if phase_name == "position_only":
+                    final_state = start_state_from_trajectory(trajectory)
+                    if final_state is None:
+                        raise RuntimeError("Position-only plan produced no final state")
+                    fk_pose = fk_pose_for_state(planner, final_state)
+                    fk_quat = [
+                        fk_pose.orientation.x,
+                        fk_pose.orientation.y,
+                        fk_pose.orientation.z,
+                        fk_pose.orientation.w,
+                    ]
+                    rot = quat_to_rot_xyzw(fk_quat)
+                    approach = rot.dot(unit_vec("tcp_local_approach_axis", TCP_LOCAL_APPROACH_AXIS))
+                    closing = rot.dot(unit_vec("tcp_local_closing_axis", TCP_LOCAL_CLOSING_AXIS))
+                    candidate["quat"] = [float(x) for x in fk_quat]
+                    candidate["approach_axis"] = [float(x) for x in approach.tolist()]
+                    candidate["target_closing_axis"] = [float(x) for x in closing.tolist()]
+                    candidate["closing_axis"] = [float(x) for x in closing.tolist()]
+                    candidate["approach_angle_deg"] = float(angle_to_down_deg(approach))
+                    candidate["tilt_deg"] = candidate["approach_angle_deg"]
+                    hover_pose = fk_pose
+                    if candidate["approach_angle_deg"] > float(CONFIG.get("max_grasp_tilt", 45.0)) + 1e-6:
+                        print("POSITION_ONLY_REJECTED_APPROACH_JSON " + json.dumps({{
+                            "approach_angle_deg": candidate["approach_angle_deg"],
+                            "max_grasp_tilt_deg": float(CONFIG.get("max_grasp_tilt", 45.0)),
+                            "reason": "position_only_target_did_not_constrain_gripper_approach_axis",
+                        }}, sort_keys=True), flush=True)
+                        continue
                 summary["name"] = "transit_to_source_hover"
                 summary["selected_yaw_candidate"] = candidate
                 summary["height_plan"] = height_plan
@@ -1421,7 +1675,7 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             if any(row["planner_success"] for row in rows if row["phase"] == "exact_top_down"):
                 break
             if not phase_had_ik_success:
-                print("TCP_EXACT_TOP_DOWN_NO_IK_SUCCESS testing bounded tilted candidates up to 20 degrees")
+                print("TCP_EXACT_TOP_DOWN_NO_IK_SUCCESS exact vertical approaches failed under the loaded joint limits")
     print("TCP_YAW_CANDIDATE_SUMMARY_JSON " + json.dumps({{
         "candidate_count": len(rows),
         "planner_success_count": sum(1 for row in rows if row["planner_success"]),
@@ -1431,14 +1685,139 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     raise RuntimeError("MoveIt planning failed for transit_to_source_hover for all tested TCP candidates")
 
 
-def execute_trajectory(planner, name, trajectory):
+def live_tcp_pose_verification(planner, target_pose, timeout_s=6.0, position_tolerance_m=0.04, orientation_tolerance_deg=25.0):
+    deadline = time.time() + float(timeout_s)
+    last_report = None
+    while time.time() <= deadline:
+        try:
+            actual_pose = planner.get_current_pose(TCP_LINK).pose
+        except TypeError:
+            actual_pose = planner.get_current_pose().pose
+        target_xyz = np.asarray([target_pose.position.x, target_pose.position.y, target_pose.position.z], dtype=float)
+        actual_xyz = np.asarray([actual_pose.position.x, actual_pose.position.y, actual_pose.position.z], dtype=float)
+        target_quat = [
+            target_pose.orientation.x,
+            target_pose.orientation.y,
+            target_pose.orientation.z,
+            target_pose.orientation.w,
+        ]
+        actual_quat = [
+            actual_pose.orientation.x,
+            actual_pose.orientation.y,
+            actual_pose.orientation.z,
+            actual_pose.orientation.w,
+        ]
+        position_error = float(np.linalg.norm(actual_xyz - target_xyz))
+        orientation_error = float(quat_angle_deg(target_quat, actual_quat))
+        last_report = {{
+            "target_tcp_link": TCP_LINK,
+            "target_pose": pose_to_dict(target_pose),
+            "actual_pose": pose_to_dict(actual_pose),
+            "position_error_m": position_error,
+            "orientation_error_deg": orientation_error,
+            "position_tolerance_m": float(position_tolerance_m),
+            "orientation_tolerance_deg": float(orientation_tolerance_deg),
+            "success": bool(position_error <= position_tolerance_m and orientation_error <= orientation_tolerance_deg),
+        }}
+        if last_report["success"]:
+            return last_report
+        rospy.sleep(0.1)
+    return last_report or {{"success": False, "error": "no live TCP pose available"}}
+
+
+def execute_trajectory(planner, name, trajectory, expected_final_pose=None):
     print("EXEC_STEP " + name)
-    ok = bool(planner.execute(trajectory, wait=True))
-    print("EXEC_RESULT %s %s" % (name, ok))
-    planner.stop()
-    planner.clear_pose_targets()
+    assert_trajectory_execution_joint_limits(name, trajectory)
+    action_name = "/arm_controllers/follow_joint_trajectory"
+    client = actionlib.SimpleActionClient(action_name, FollowJointTrajectoryAction)
+    if not client.wait_for_server(rospy.Duration(5.0)):
+        raise RuntimeError("Timed out waiting for " + action_name)
+    goal = FollowJointTrajectoryGoal()
+    goal.trajectory = trajectory.joint_trajectory
+    point_count = len(goal.trajectory.points)
+    duration_s = (
+        float(goal.trajectory.points[-1].time_from_start.to_sec())
+        if point_count
+        else 0.0
+    )
+    wait_timeout_s = max(30.0, duration_s + 75.0)
+    print("EXEC_ACTION_GOAL_JSON " + json.dumps({{
+        "name": name,
+        "action": action_name,
+        "trajectory_points": point_count,
+        "trajectory_duration_s": duration_s,
+        "wait_timeout_s": wait_timeout_s,
+    }}, sort_keys=True), flush=True)
+    client.send_goal(goal)
+    finished = client.wait_for_result(rospy.Duration(wait_timeout_s))
+    result = client.get_result() if finished else None
+    state = client.get_state()
+    status_text = client.get_goal_status_text()
+    error_code = getattr(result, "error_code", None) if result is not None else None
+    error_string = getattr(result, "error_string", "") if result is not None else "timeout waiting for action result"
+    ok = bool(finished and result is not None and error_code == 0)
+    print("EXEC_ACTION_RESULT_JSON " + json.dumps({{
+        "name": name,
+        "finished": bool(finished),
+        "state": int(state),
+        "status_text": status_text,
+        "error_code": error_code,
+        "error_string": error_string,
+        "success": ok,
+    }}, sort_keys=True), flush=True)
+    tcp_verification = None
+    if expected_final_pose is not None and (
+        ok or "Timed out waiting for Piper joint feedback at final trajectory point" in str(error_string)
+    ):
+        tcp_verification = live_tcp_pose_verification(planner, expected_final_pose)
+        print("EXEC_TCP_VERIFICATION_JSON " + json.dumps({{
+            "name": name,
+            **tcp_verification,
+        }}, sort_keys=True), flush=True)
+        ok = bool(tcp_verification.get("success"))
     if not ok:
-        raise RuntimeError("Execution failed at " + name)
+        client.cancel_goal()
+        raise RuntimeError("Execution failed at %s: %s" % (name, error_string))
+
+
+def plan_vertical_from_live_tcp(planner, name, delta_z):
+    planner.set_start_state_to_current_state()
+    try:
+        current_pose = planner.get_current_pose(TCP_LINK).pose
+    except TypeError:
+        current_pose = planner.get_current_pose().pose
+    target_pose = copy.deepcopy(current_pose)
+    target_pose.position.z = float(target_pose.position.z) + float(delta_z)
+    assert_workspace(name, [target_pose.position.x, target_pose.position.y, target_pose.position.z])
+    trajectory, summary, final_state = plan_cartesian(
+        planner,
+        name,
+        [target_pose],
+        planner.get_current_state(),
+    )
+    print("LIVE_VERTICAL_SEGMENT_JSON " + json.dumps({{
+        "name": name,
+        "delta_z_m": float(delta_z),
+        "start_pose": pose_to_dict(current_pose),
+        "target_pose": pose_to_dict(target_pose),
+        "fraction": summary.get("fraction"),
+        "points": summary.get("points"),
+    }}, sort_keys=True), flush=True)
+    return trajectory, summary, final_state, target_pose
+
+
+def current_state_summary():
+    state = env.get_robot_state()
+    end_pose = env.get_robot_end_pose()
+    def arr(value):
+        return None if value is None else [float(x) for x in list(value)]
+    return {{
+        "joint_positions": arr(state.get("joint_positions")),
+        "joint_velocities": arr(state.get("joint_velocities")),
+        "gripper_position_m": arr(state.get("gripper_position")),
+        "piper_end_pose_topic": end_pose,
+        "note": "/end_pose is the Piper wrist/end-pose topic; MoveIt gripper_tcp is reported separately as CURRENT_TCP_POSE_JSON",
+    }}
 
 
 def compute_gripper_plan(detected_width, close_width_override):
@@ -1449,7 +1828,12 @@ def compute_gripper_plan(detected_width, close_width_override):
     saturated = detected >= gripper_max - 0.001
     if close_width_override is None:
         source = "automatic"
-        close_width = None if saturated else max(gripper_min, detected - 0.005)
+        profile_width = (CONFIG.get("saturated_close_width_by_source") or {{}}).get(str(CONFIG.get("source") or "").lower())
+        if saturated and profile_width is not None:
+            source = "object_profile"
+            close_width = max(gripper_min, min(gripper_max, float(profile_width)))
+        else:
+            close_width = None if saturated else max(gripper_min, detected - 0.005)
     else:
         source = "explicit"
         close_width = float(close_width_override)
@@ -1466,7 +1850,7 @@ def compute_gripper_plan(detected_width, close_width_override):
                 % (close_width, open_width)
             )
 
-    if CONFIG["execute"] and saturated and close_width_override is None:
+    if CONFIG["execute"] and saturated and close_width_override is None and close_width is None:
         raise RuntimeError(
             "Detected grasp width %.4f m is saturated at gripper max %.4f m; "
             "execute mode requires explicit --close-width"
@@ -1480,6 +1864,7 @@ def compute_gripper_plan(detected_width, close_width_override):
         "close_width_m": close_width,
         "close_width_source": source,
         "grip_margin_m": None if close_width is None else detected - close_width,
+        "source_label": CONFIG.get("source"),
     }}
 
 
@@ -1855,6 +2240,7 @@ if CONFIG["destination_perception_only"]:
 current_pose = env.get_robot_end_pose()
 if current_pose is None:
     raise RuntimeError("No current end-effector pose from /end_pose")
+print("CURRENT_PHYSICAL_STATE_JSON " + json.dumps(current_state_summary(), sort_keys=True), flush=True)
 
 section("SOURCE DETECTION")
 source_detection = select_source()
@@ -1917,6 +2303,14 @@ if CONFIG["perception_only"]:
 
 section("MOTION PLANNING")
 grasp_z = source_base[2] + float(CONFIG["grasp_z_offset"])
+print("SOURCE_GRASP_HEIGHT_SEMANTICS_JSON " + json.dumps({{
+    "source_base_xyz": source_base,
+    "source_base_semantics": "normalized source point used by planner; for perception this is AnyGrasp selected_grasp.translation_base geometric grasp center",
+    "grasp_z_offset_m": float(CONFIG["grasp_z_offset"]),
+    "requested_grasp_tcp_z": float(grasp_z),
+    "hover_height_m": float(CONFIG["hover_height"]),
+    "default_policy": "grasp_z_offset defaults to 0.0 because perception source z is already a grasp-center reference, not a table surface",
+}}, sort_keys=True), flush=True)
 
 planner = MoveGroupCommander("arm")
 planner.set_end_effector_link(TCP_LINK)
@@ -2097,21 +2491,25 @@ if CONFIG["task"] == "place":
     summaries.append(destination_rise_summary)
 
 print("MOVEIT_PLAN_JSON " + json.dumps(summaries, sort_keys=True))
+preview_order = [
+    "transit_to_source_hover",
+    "source_descend",
+    "source_lift",
+    "transport_to_destination_hover",
+    "destination_descend",
+    "destination_rise",
+]
 
 if CONFIG["plan_only"]:
-    preview_order = [
-        "transit_to_source_hover",
-        "source_descend",
-        "source_lift",
-        "transport_to_destination_hover",
-        "destination_descend",
-        "destination_rise",
-    ]
     publish_rviz_preview(planner, [plans[name] for name in preview_order if name in plans])
     print("PLAN_ONLY_COMPLETE no robot movement commanded")
 else:
+    publish_rviz_preview(planner, [plans[name] for name in preview_order if name in plans])
     section("EXECUTION")
-    env._ensure_piper_enabled()
+    assert_current_execution_joint_limits(planner)
+    assert_planned_execution_joint_limits(plans, preview_order)
+    if not env._ensure_piper_enabled():
+        raise RuntimeError("PIPER_ENABLE_FAILED /enable_srv did not confirm the arm is enabled")
     print("EXECUTION_START")
     print("EXEC_STEP open_gripper")
     result = env.set_gripper(open_width)
@@ -2119,8 +2517,14 @@ else:
     if not result.get("success"):
         raise RuntimeError("open_gripper failed")
 
-    execute_trajectory(planner, "transit_to_source_hover", plans["transit_to_source_hover"])
-    execute_trajectory(planner, "source_descend", plans["source_descend"])
+    execute_trajectory(planner, "transit_to_source_hover", plans["transit_to_source_hover"], source_hover_pose)
+    live_descend_delta = float(source_grasp_pose.position.z) - float(source_hover_pose.position.z)
+    live_descend_trajectory, _live_descend_summary, _live_descend_state, live_grasp_pose = plan_vertical_from_live_tcp(
+        planner,
+        "source_descend_live",
+        live_descend_delta,
+    )
+    execute_trajectory(planner, "source_descend_live", live_descend_trajectory, live_grasp_pose)
 
     print("EXEC_STEP close_gripper")
     result = env.set_gripper(close_width)
@@ -2128,17 +2532,22 @@ else:
     if not result.get("success"):
         raise RuntimeError("close_gripper failed")
 
-    execute_trajectory(planner, "source_lift", plans["source_lift"])
+    live_lift_trajectory, _live_lift_summary, _live_lift_state, live_lift_pose = plan_vertical_from_live_tcp(
+        planner,
+        "source_lift_live",
+        -live_descend_delta,
+    )
+    execute_trajectory(planner, "source_lift_live", live_lift_trajectory, live_lift_pose)
 
     if CONFIG["task"] == "place":
-        execute_trajectory(planner, "transport_to_destination_hover", plans["transport_to_destination_hover"])
-        execute_trajectory(planner, "destination_descend", plans["destination_descend"])
+        execute_trajectory(planner, "transport_to_destination_hover", plans["transport_to_destination_hover"], destination_hover_pose)
+        execute_trajectory(planner, "destination_descend", plans["destination_descend"], destination_place_pose)
         print("EXEC_STEP open_gripper_release")
         result = env.set_gripper(open_width)
         print("EXEC_RESULT open_gripper_release %s" % result)
         if not result.get("success"):
             raise RuntimeError("open_gripper_release failed")
-        execute_trajectory(planner, "destination_rise", plans["destination_rise"])
+        execute_trajectory(planner, "destination_rise", plans["destination_rise"], destination_hover_pose)
         print("VISUAL_VERIFICATION_JSON " + json.dumps(visual_verify(source_base, destination_base), sort_keys=True))
 
     print("EXECUTION_COMPLETE")
@@ -2177,7 +2586,7 @@ def render_stream_chunk(chunk: str) -> str:
     if not chunk:
         return ""
     # The full result JSON remains unchanged on disk. This is only terminal rendering.
-    return chunk.replace("\\n", "\n")
+    return chunk.replace("\\\\n", "\n").replace("\\n", "\n")
 
 
 def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, verbose_result: bool = False) -> int:
@@ -2231,9 +2640,9 @@ def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, 
         stdout_offset = int(state.get("stdout_offset", stdout_offset))
         stderr_offset = int(state.get("stderr_offset", stderr_offset))
         if state.get("stdout"):
-            print(render_stream_chunk(str(state["stdout"])), end="")
+            print(render_stream_chunk(str(state["stdout"])), end="", flush=True)
         if state.get("stderr"):
-            print(render_stream_chunk(str(state["stderr"])), end="", file=sys.stderr)
+            print(render_stream_chunk(str(state["stderr"])), end="", file=sys.stderr, flush=True)
         status = str(state.get("status", "unknown"))
     if status != "completed":
         final = http_json("GET", base + "/code/result")
@@ -2301,19 +2710,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-x", type=float)
     parser.add_argument("--source-y", type=float)
     parser.add_argument("--source-z", type=float)
-    parser.add_argument("--close-width", type=float, help="Explicit total physical gripper opening in meters")
+    parser.add_argument(
+        "--close-width",
+        type=float,
+        help=(
+            "Explicit total physical gripper opening in meters. "
+            "If omitted for a saturated cup estimate, the built-in cup profile uses 0.035 m."
+        ),
+    )
     parser.add_argument("--grasp-region", choices=("auto", "off"), default="auto")
     parser.add_argument(
         "--grasp-region-config",
         default="/home/dase-hw101/ABot-Claw/robot_layer/arm_piper/agent_server/config/piper_validated_grasp_regions.yaml",
     )
-    parser.add_argument("--max-grasp-tilt", type=float, default=25.0)
+    parser.add_argument("--max-grasp-tilt", type=float, default=45.0)
     parser.add_argument("--visualize-candidates", action="store_true")
     parser.add_argument("--verbose-diagnostics", action="store_true")
     parser.add_argument(
         "--explore-unvalidated-candidates",
         action="store_true",
-        help="Plan-only diagnostic search outside validated voxels; never weakens execute gating",
+        help="Enable extra plan-only diagnostics for candidates outside validated voxels",
     )
     parser.add_argument("--exploratory-planning-budget", type=float, default=60.0)
     parser.add_argument("--aruco-frame", default="aruco_marker_frame")
@@ -2328,7 +2744,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--transit-z", type=float, default=0.32)
     parser.add_argument("--hover-height", type=float, default=0.10)
-    parser.add_argument("--grasp-z-offset", type=float, default=0.035)
+    parser.add_argument(
+        "--grasp-z-offset",
+        type=float,
+        default=0.0,
+        help=(
+            "TCP Z offset added to the normalized source point. "
+            "Default is 0.0 because perception source z is the AnyGrasp grasp-center reference."
+        ),
+    )
     parser.add_argument("--place-z-offset", type=float, default=0.045)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--verbose-result", action="store_true")
@@ -2362,8 +2786,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--source-width must be greater than 0")
     if args.close_width is not None and args.close_width <= 0.0:
         parser.error("--close-width must be greater than 0")
-    if args.max_grasp_tilt <= 0.0 or args.max_grasp_tilt > 30.0:
-        parser.error("--max-grasp-tilt must be in (0, 30]")
+    if args.max_grasp_tilt <= 0.0 or args.max_grasp_tilt > 60.0:
+        parser.error("--max-grasp-tilt must be in (0, 60]")
     if args.exploratory_planning_budget <= 0.0:
         parser.error("--exploratory-planning-budget must be greater than 0")
     if args.execute and args.explore_unvalidated_candidates:
