@@ -25,6 +25,10 @@ robot_layer/arm_piper/agent_server/camera_to_base_failed_*.yaml
 robot_layer/arm_piper/agent_server/start_realsense_d555_py.sh.before-*
 robot_layer/arm_piper/agent_server/*.orientation_bak.py
 robot_layer/arm_piper/agent_server/robot_driver_ros/src/
+robot_layer/arm_piper/agent_server/robot_driver_ros/.catkin_tools/
+robot_layer/arm_piper/agent_server/robot_driver_ros/build_catkin_tools_diag/
+robot_layer/arm_piper/agent_server/robot_driver_ros/devel_catkin_tools_diag/
+robot_layer/arm_piper/agent_server/robot_driver_ros/logs_catkin_tools_diag/
 service_layer/YOLO/-e
 service_layer/YOLO/abot-piper-noetic
 service_layer/YOLO/*.pt
