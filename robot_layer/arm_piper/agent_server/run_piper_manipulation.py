@@ -234,6 +234,7 @@ import os
 import time
 import xml.etree.ElementTree as ET
 import atexit
+import copy
 
 import cv2
 import numpy as np
@@ -769,7 +770,7 @@ def retime_trajectory(planner, start_state, trajectory):
     )
 
 
-def plan_cartesian(planner, name, waypoints, start_state=None):
+def plan_cartesian(planner, name, waypoints, start_state=None, raise_on_failure=True):
     if start_state is not None:
         planner.set_start_state(start_state)
     for index, waypoint in enumerate(waypoints):
@@ -798,10 +799,43 @@ def plan_cartesian(planner, name, waypoints, start_state=None):
     }}
     diag.update(trajectory_joint_summary(trajectory))
     print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(diag, sort_keys=True))
-    if fraction < 0.999:
+    if raise_on_failure and fraction < 0.999:
         raise RuntimeError("Cartesian path %s incomplete: fraction=%.6f" % (name, fraction))
-    if point_count == 0:
+    if raise_on_failure and point_count == 0:
         raise RuntimeError("Cartesian path %s produced no trajectory points" % name)
+    final_state = start_state_from_trajectory(trajectory)
+    return trajectory, diag, final_state
+
+
+def reverse_trajectory_for_lift(name, descend_trajectory, final_requested_pose):
+    jt = getattr(descend_trajectory, "joint_trajectory", None)
+    points = list(getattr(jt, "points", []))
+    if len(points) < 2:
+        raise RuntimeError("%s cannot reverse descend trajectory with %d points" % (name, len(points)))
+    trajectory = copy.deepcopy(descend_trajectory)
+    total = points[-1].time_from_start if hasattr(points[-1], "time_from_start") else rospy.Duration(0.0)
+    reversed_points = []
+    for point in reversed(points):
+        new_point = copy.deepcopy(point)
+        try:
+            new_point.time_from_start = total - point.time_from_start
+        except Exception:
+            pass
+        if getattr(new_point, "velocities", None):
+            new_point.velocities = [-float(v) for v in new_point.velocities]
+        reversed_points.append(new_point)
+    trajectory.joint_trajectory.points = reversed_points
+    diag = {{
+        "name": name,
+        "type": "cartesian_reverse",
+        "success": True,
+        "fraction": 1.0,
+        "points": trajectory_point_count(trajectory),
+        "source": "reverse_of_source_descend",
+        "final_requested_pose": pose_to_dict(final_requested_pose),
+    }}
+    diag.update(trajectory_joint_summary(trajectory))
+    print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(diag, sort_keys=True))
     final_state = start_state_from_trajectory(trajectory)
     return trajectory, diag, final_state
 
@@ -1891,7 +1925,20 @@ source_lift_trajectory, source_lift_summary, source_lift_final_state = plan_cart
     "source_lift",
     [source_hover_pose],
     source_descend_final_state,
+    raise_on_failure=False,
 )
+if not source_lift_summary.get("success"):
+    print("SOURCE_LIFT_REVERSE_FALLBACK_JSON " + json.dumps({{
+        "reason": "direct_compute_cartesian_path_incomplete",
+        "direct_fraction": source_lift_summary.get("fraction"),
+        "direct_points": source_lift_summary.get("points"),
+        "fallback": "reverse_of_validated_source_descend",
+    }}, sort_keys=True))
+    source_lift_trajectory, source_lift_summary, source_lift_final_state = reverse_trajectory_for_lift(
+        "source_lift",
+        source_descend_trajectory,
+        source_hover_pose,
+    )
 plans["source_lift"] = source_lift_trajectory
 summaries.append(source_lift_summary)
 if yaw_candidate.get("validated_region_selection"):
@@ -2034,6 +2081,13 @@ def release_lease(agent_url: str, lease_id: str) -> None:
         print(f"LEASE_RELEASE_FAILED {exc}", file=sys.stderr)
 
 
+def render_stream_chunk(chunk: str) -> str:
+    if not chunk:
+        return ""
+    # The full result JSON remains unchanged on disk. This is only terminal rendering.
+    return chunk.replace("\\n", "\n")
+
+
 def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, verbose_result: bool = False) -> int:
     base = agent_url.rstrip("/")
     status_before = lease_status(agent_url)
@@ -2085,9 +2139,9 @@ def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, 
         stdout_offset = int(state.get("stdout_offset", stdout_offset))
         stderr_offset = int(state.get("stderr_offset", stderr_offset))
         if state.get("stdout"):
-            print(state["stdout"], end="")
+            print(render_stream_chunk(str(state["stdout"])), end="")
         if state.get("stderr"):
-            print(state["stderr"], end="", file=sys.stderr)
+            print(render_stream_chunk(str(state["stderr"])), end="", file=sys.stderr)
         status = str(state.get("status", "unknown"))
     if status != "completed":
         final = http_json("GET", base + "/code/result")
