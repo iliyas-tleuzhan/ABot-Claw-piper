@@ -184,8 +184,8 @@ class GraspSDK:
         with self._lock:
             if self._last_color_bgr is None or self._last_depth_u16 is None or self._camera_K is None:
                 raise RuntimeError(
-                    "等待 ROS 传感器数据超时 "
-                    f"({self._timeout}s): color={self._image_topic}, "
+                    "Timed out waiting for ROS sensor data "
+                    f"after {self._timeout}s: color={self._image_topic}, "
                     f"depth={self._depth_topic}, info={self._camera_info_topic}"
                 )
 
@@ -263,7 +263,7 @@ class GraspSDK:
         with self._lock:
             img = None if self._last_color_bgr is None else self._last_color_bgr.copy()
         if img is None:
-            raise RuntimeError(f"尚未收到 ROS 图像: {self._image_topic}")
+            raise RuntimeError(f"No ROS image has been received yet: {self._image_topic}")
         return img
 
     def _read_depth_u16(self) -> np.ndarray:
@@ -272,7 +272,7 @@ class GraspSDK:
         with self._lock:
             d = None if self._last_depth_u16 is None else self._last_depth_u16.copy()
         if d is None:
-            raise RuntimeError(f"尚未收到 ROS 深度图: {self._depth_topic}")
+            raise RuntimeError(f"No ROS depth image has been received yet: {self._depth_topic}")
         return d
 
     def _read_camera_K(self) -> np.ndarray:
@@ -281,7 +281,7 @@ class GraspSDK:
         with self._lock:
             K = None if self._camera_K is None else self._camera_K.copy()
         if K is None:
-            raise RuntimeError(f"尚未收到相机内参: {self._camera_info_topic}")
+            raise RuntimeError(f"No ROS camera intrinsics have been received yet: {self._camera_info_topic}")
         return K
 
     def _encode_color_image_rgb(self, img_bgr: np.ndarray) -> str:

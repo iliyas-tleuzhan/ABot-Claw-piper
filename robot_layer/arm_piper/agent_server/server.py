@@ -48,6 +48,16 @@ def build_app(cfg: ServerConfig, service_mgr: ServiceManager | None = None) -> F
             return RedirectResponse(url="/services/dashboard")
         return {"status": "ok", "message": "Piper Robot Agent Server", "docs": "/docs"}
 
+    @app.get("/health", include_in_schema=False)
+    async def health():
+        from code_executor import executor_runtime_metadata
+
+        return {
+            "status": "ok",
+            "lease": lease_mgr.status(),
+            "executor": executor_runtime_metadata(),
+        }
+
     # -- 状态聚合器 ---------------------------------------------------------
     # Prefer a real ROS-backed env in the main process so /state can expose
     # real joint/end-pose/gripper/camera availability. Fall back to env=None

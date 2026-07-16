@@ -1,7 +1,11 @@
 source_commit: ae5c1f705755f864524aae2741b8fa17ee912c93
 regions:
   - name: local_validated_representative_region
-    usage: [source_pick, destination_place]
+    usage: [source_pick]
+    execution_validated: false
+    validation_scope: representative_only
+    exploratory_cluster_bounds:
+      note: "Dense FK cluster for plan-only recommendation only; not an execution-validated AABB."
     tcp_hover_xyz:
       center: [0.2829924696, -0.2351072652, 0.1558323327]
       min: [0.2236603553, -0.2939632436, 0.1200009112]
@@ -41,3 +45,29 @@ regions:
       transit_trajectory_points: 59
       descend_all_depths_fraction_1: true
       lift_all_depths_fraction_1: true
+    validated_voxels:
+      - voxel_id: local_rep_h007_001
+        usage: [source_pick]
+        execution_validated: true
+        validation_scope: individual_voxel
+        source_surface_xyz: [0.2706424051, -0.2036373721, 0.0501236963]
+        source_surface_bounds:
+          min: [0.2656424051, -0.2086373721, 0.0451236963]
+          max: [0.2756424051, -0.1986373721, 0.0551236963]
+        tcp_hover_xyz: [0.2706424051, -0.2036373721, 0.1201236963]
+        tcp_quaternion: [-0.5537517682, 0.8297666196, -0.06427298023, 0.02674547221]
+        approach_angle_deg: 7.983821438
+        preferred_ik_seed: [-0.6508948364, 1.654318391, -1.25344329, 0.009719207131, 1.118071667, -1.831507173]
+        actual_ik_solution: [-0.6508950224, 1.6543183994, -1.2534433079, 0.0097196213, 1.1180716907, -1.8315074270]
+        minimum_joint_limit_margin_rad: 0.1019283093
+        validated_hover_height_m: 0.07
+        grasp_depth_m: 0.035
+        place_depth_m: null
+        transit_validation:
+          success: true
+          trajectory_points: 59
+          error: SUCCESS
+        descend_fraction: 1.0
+        lift_fraction: 1.0
+        validation_timestamp: "2026-07-16T03:07:41+08:00"
+        source_commit: 916a910cacc7a7b316ccc0d9facd46aa4c1211cd

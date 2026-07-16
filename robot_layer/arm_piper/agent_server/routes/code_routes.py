@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from fastapi.responses import JSONResponse, Response
 
-from code_executor import CodeExecutor, CodeValidationResult, ExecutionResult, ExecutionStatus
+from code_executor import CodeExecutor, CodeValidationResult, ExecutionResult, ExecutionStatus, executor_runtime_metadata
 from config import TIMING
 from execution_recorder import ExecutionRecorder
 from lease import LeaseManager
@@ -51,6 +51,7 @@ class CodeStatusResponse(BaseModel):
     code: Optional[str] = None
     error: str = ""
     stop_reason: str = ""
+    executor: dict = Field(default_factory=dict)
 
 
 class CodeResultResponse(BaseModel):
@@ -297,6 +298,7 @@ def init_code_routes(lease_manager: LeaseManager, camera_backend=None, state_agg
             code=executor.current_code,
             error=error,
             stop_reason=stop_reason,
+            executor=executor_runtime_metadata(),
         )
 
     @router.get("/result", response_model=CodeResultResponse)
