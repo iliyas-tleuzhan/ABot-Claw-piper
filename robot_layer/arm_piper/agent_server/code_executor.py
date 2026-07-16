@@ -691,11 +691,10 @@ from memory_sdk import MemorySDK
 # Robot control (ROS/MoveIt)
 env = PiperRobotEnv()
 
-# Perception (HTTP API + ROS)
+# Perception (HTTP API + ROS). SDKs start lazily when submitted code reads
+# camera-backed data, so manual/ArUco plan-only paths do not block on images.
 yolo = YoloSDK()
-yolo.start()
 grasp = GraspSDK()
-grasp.start()
 
 # Spatial Memory Hub (HTTP API)
 memory = MemorySDK()

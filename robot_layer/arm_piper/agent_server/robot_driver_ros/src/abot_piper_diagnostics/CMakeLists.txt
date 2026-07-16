@@ -33,6 +33,12 @@ add_executable(piper_fk_workspace_mapper src/piper_fk_workspace_mapper.cpp)
 add_dependencies(piper_fk_workspace_mapper ${catkin_EXPORTED_TARGETS})
 target_link_libraries(piper_fk_workspace_mapper ${catkin_LIBRARIES})
 
-install(TARGETS piper_fk_workspace_mapper
+add_executable(piper_fk_local_workspace_mapper src/piper_fk_local_workspace_mapper.cpp)
+add_dependencies(piper_fk_local_workspace_mapper ${catkin_EXPORTED_TARGETS})
+target_link_libraries(piper_fk_local_workspace_mapper ${catkin_LIBRARIES})
+
+install(TARGETS
+  piper_fk_workspace_mapper
+  piper_fk_local_workspace_mapper
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
