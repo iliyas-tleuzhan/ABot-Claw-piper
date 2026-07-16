@@ -1,4 +1,9 @@
+schema_version: 1
 source_commit: ae5c1f705755f864524aae2741b8fa17ee912c93
+source_coordinate_semantics:
+  normalized_source_base_xyz: "Planner source point. For perception this is GraspSDK selected_grasp.translation_base."
+  grasp_sdk_translation_base: "AnyGrasp geometric grasp center transformed to base_link; not translation_base_retreat and not a table surface point."
+  voxel_source_surface_xyz_legacy_name: "Legacy field name; compared as normalized_source_base_xyz."
 regions:
   - name: local_validated_representative_region
     usage: [source_pick]

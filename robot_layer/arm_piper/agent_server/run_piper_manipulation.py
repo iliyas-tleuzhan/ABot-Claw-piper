@@ -8,12 +8,15 @@ import json
 import os
 import sys
 import time
-import traceback
 from typing import Any, Dict, Optional
 from urllib import error, request
 
+import yaml
+
 
 TERMINAL_STATUSES = {"completed", "failed", "timeout", "stopped", "idle"}
+VALIDATED_REGION_SCHEMA_VERSION = 1
+HEARTBEAT_INTERVAL_S = 20.0
 
 
 def compute_gripper_plan_values(
@@ -87,7 +90,107 @@ def http_json(
     return json.loads(body) if body else {}
 
 
+def _require_vec(name: str, value: Any, length: int) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise ValueError(f"{name} must be a {length}-element list")
+    out = [float(v) for v in value]
+    return out
+
+
+def load_validated_region_config(path: str, enabled: bool) -> Dict[str, Any]:
+    if not enabled:
+        return {
+            "schema_version": VALIDATED_REGION_SCHEMA_VERSION,
+            "source_path": path,
+            "embedded": False,
+            "regions": [],
+            "region_count": 0,
+            "voxel_count": 0,
+            "status": "disabled",
+        }
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        raise RuntimeError(
+            "VALIDATED_GRASP_REGION_CONFIG_ERROR_JSON "
+            + json.dumps(
+                {
+                    "source_path": path,
+                    "embedded": False,
+                    "error": str(exc),
+                    "region_count": 0,
+                    "voxel_count": 0,
+                },
+                sort_keys=True,
+            )
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Validated grasp region config must be a mapping: " + path)
+    schema_version = int(data.get("schema_version", VALIDATED_REGION_SCHEMA_VERSION))
+    if schema_version != VALIDATED_REGION_SCHEMA_VERSION:
+        raise RuntimeError(
+            "Unsupported validated grasp region schema_version %s in %s"
+            % (schema_version, path)
+        )
+    regions = data.get("regions")
+    if not isinstance(regions, list) or not regions:
+        raise RuntimeError("Validated grasp region config has no regions: " + path)
+    voxel_count = 0
+    for r_index, region in enumerate(regions):
+        if not isinstance(region, dict):
+            raise RuntimeError(f"Region {r_index} is not a mapping")
+        if not region.get("name"):
+            raise RuntimeError(f"Region {r_index} missing name")
+        voxels = region.get("validated_voxels")
+        if not isinstance(voxels, list):
+            raise RuntimeError(f"Region {region.get('name')} missing validated_voxels list")
+        for v_index, voxel in enumerate(voxels):
+            prefix = f"Region {region.get('name')} voxel {v_index}"
+            if not isinstance(voxel, dict):
+                raise RuntimeError(prefix + " is not a mapping")
+            for key in (
+                "voxel_id",
+                "usage",
+                "source_surface_xyz",
+                "source_surface_bounds",
+                "tcp_hover_xyz",
+                "tcp_quaternion",
+                "preferred_ik_seed",
+                "actual_ik_solution",
+                "validated_hover_height_m",
+                "descend_fraction",
+                "lift_fraction",
+            ):
+                if key not in voxel:
+                    raise RuntimeError(prefix + " missing " + key)
+            bounds = voxel["source_surface_bounds"]
+            if not isinstance(bounds, dict):
+                raise RuntimeError(prefix + " source_surface_bounds must be a mapping")
+            _require_vec(prefix + ".source_surface_xyz", voxel["source_surface_xyz"], 3)
+            _require_vec(prefix + ".source_surface_bounds.min", bounds.get("min"), 3)
+            _require_vec(prefix + ".source_surface_bounds.max", bounds.get("max"), 3)
+            _require_vec(prefix + ".tcp_hover_xyz", voxel["tcp_hover_xyz"], 3)
+            _require_vec(prefix + ".tcp_quaternion", voxel["tcp_quaternion"], 4)
+            _require_vec(prefix + ".preferred_ik_seed", voxel["preferred_ik_seed"], 6)
+            _require_vec(prefix + ".actual_ik_solution", voxel["actual_ik_solution"], 6)
+            voxel_count += 1
+    return {
+        **data,
+        "schema_version": schema_version,
+        "source_path": path,
+        "embedded": True,
+        "region_count": len(regions),
+        "voxel_count": voxel_count,
+        "status": "ok",
+    }
+
+
 def build_robot_code(args: argparse.Namespace) -> str:
+    validated_region_data = load_validated_region_config(
+        args.grasp_region_config,
+        enabled=args.grasp_region == "auto",
+    )
     cfg = {
         "task": args.task,
         "source": args.source,
@@ -102,8 +205,12 @@ def build_robot_code(args: argparse.Namespace) -> str:
         "source_xyz": [args.source_x, args.source_y, args.source_z],
         "grasp_region": args.grasp_region,
         "grasp_region_config": args.grasp_region_config,
+        "validated_grasp_region_data": validated_region_data,
         "max_grasp_tilt": args.max_grasp_tilt,
         "visualize_candidates": args.visualize_candidates,
+        "verbose_diagnostics": args.verbose_diagnostics,
+        "explore_unvalidated_candidates": args.explore_unvalidated_candidates,
+        "exploratory_planning_budget_s": args.exploratory_planning_budget,
         "aruco_frame": args.aruco_frame,
         "aruco_offset_xyz": [args.aruco_offset_x, args.aruco_offset_y, args.aruco_offset_z],
         "top_k": args.top_k,
@@ -607,22 +714,36 @@ def check_pose_ik(planner, pose, preferred_seed_joint_state=None):
         return {{"available": False, "success": False, "error": str(exc), "seeds": []}}
 
 
-def summarize_plan(name, result, raise_on_failure=True):
+def safe_planning_time(value):
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(out) or out < 0.0 or out > 3600.0:
+        return None
+    # MoveIt can leave this double uninitialized on some failure paths.
+    if abs(out) < 1e-9:
+        return None
+    return out
+
+
+def summarize_plan(name, result, raise_on_failure=True, planner_wall_time_s=None):
     if isinstance(result, tuple):
         success = bool(result[0])
         trajectory = result[1]
-        planning_time = float(result[2]) if len(result) > 2 else 0.0
+        planning_time = safe_planning_time(result[2]) if len(result) > 2 else None
         error_code = moveit_error_summary(result[3]) if len(result) > 3 else ""
     else:
         trajectory = result
         points = getattr(getattr(trajectory, "joint_trajectory", None), "points", [])
         success = len(points) > 0
-        planning_time = 0.0
+        planning_time = None
         error_code = ""
+    wall_time = float(planner_wall_time_s) if planner_wall_time_s is not None else None
     points = getattr(getattr(trajectory, "joint_trajectory", None), "points", [])
     count = len(points)
-    print("PLAN %s success=%s points=%d planning_time=%.3f error=%s" % (
-        name, success, count, planning_time, error_code
+    print("PLAN %s success=%s points=%d planner_reported_time=%s wall_time=%s error=%s" % (
+        name, success, count, str(planning_time), str(wall_time), error_code
     ))
     if raise_on_failure and (not success or count == 0):
         raise RuntimeError("MoveIt planning failed for %s: error=%s points=%d" % (name, error_code, count))
@@ -631,7 +752,8 @@ def summarize_plan(name, result, raise_on_failure=True):
         "type": "pose_target",
         "success": success,
         "points": count,
-        "planning_time": planning_time,
+        "planner_reported_time_s": planning_time,
+        "planner_wall_time_s": wall_time,
         "error": error_code,
     }}
     summary.update(trajectory_joint_summary(trajectory))
@@ -691,7 +813,15 @@ def plan_target(planner, name, xyz, quat, start_state=None, raise_on_failure=Tru
     planner.clear_pose_targets()
     requested_pose = pose_msg(xyz, quat)
     planner.set_pose_target(requested_pose)
-    trajectory, summary = summarize_plan(name, planner.plan(), raise_on_failure=raise_on_failure)
+    plan_started = time.time()
+    result = planner.plan()
+    wall_time = time.time() - plan_started
+    trajectory, summary = summarize_plan(
+        name,
+        result,
+        raise_on_failure=raise_on_failure,
+        planner_wall_time_s=wall_time,
+    )
     summary["final_requested_pose"] = pose_to_dict(requested_pose)
     print("TRAJECTORY_DIAGNOSTIC_JSON " + json.dumps(summary, sort_keys=True))
     state = start_state_from_trajectory(trajectory)
@@ -766,7 +896,15 @@ def plan_joint_solution(planner, name, pose, ik_result, raise_on_failure=True):
         }}
     planner.clear_pose_targets()
     planner.set_joint_value_target([float(x) for x in joints])
-    trajectory, summary = summarize_plan(name, planner.plan(), raise_on_failure=raise_on_failure)
+    plan_started = time.time()
+    result = planner.plan()
+    wall_time = time.time() - plan_started
+    trajectory, summary = summarize_plan(
+        name,
+        result,
+        raise_on_failure=raise_on_failure,
+        planner_wall_time_s=wall_time,
+    )
     summary["final_requested_pose"] = pose_to_dict(pose)
     summary["target_source"] = "validated_ik_joint_solution"
     verification = verify_final_plan_state(planner, trajectory, pose, solution)
@@ -818,17 +956,28 @@ def reachability_diagnostic(tcp_xyz, candidate, world_link6_to_tcp):
 def load_validated_grasp_regions():
     if CONFIG.get("grasp_region") != "auto":
         return []
-    path = CONFIG.get("grasp_region_config")
-    if not path:
-        return []
-    if not os.path.exists(path):
-        print("VALIDATED_GRASP_REGION_CONFIG_MISSING " + path)
-        return []
-    with open(path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {{}}
+    data = CONFIG.get("validated_grasp_region_data") or {{}}
+    status = {{
+        "host_source_path": CONFIG.get("grasp_region_config"),
+        "embedded": bool(data.get("embedded")),
+        "status": data.get("status"),
+        "schema_version": data.get("schema_version"),
+        "region_count": int(data.get("region_count") or 0),
+        "voxel_count": int(data.get("voxel_count") or 0),
+    }}
+    print("VALIDATED_GRASP_REGION_CONFIG_JSON " + json.dumps(status, sort_keys=True), flush=True)
+    if not data.get("embedded") or data.get("status") != "ok":
+        print("VALIDATED_GRASP_REGION_CONFIG_ERROR_JSON " + json.dumps(status, sort_keys=True), flush=True)
+        raise RuntimeError("Validated grasp region configuration is unavailable or invalid")
     regions = data.get("regions") or []
     if not isinstance(regions, list):
-        raise RuntimeError("Validated grasp region file has invalid regions list: " + path)
+        status["error"] = "regions is not a list"
+        print("VALIDATED_GRASP_REGION_CONFIG_ERROR_JSON " + json.dumps(status, sort_keys=True), flush=True)
+        raise RuntimeError("Validated grasp region configuration has invalid regions list")
+    if not regions:
+        status["error"] = "no regions"
+        print("VALIDATED_GRASP_REGION_CONFIG_ERROR_JSON " + json.dumps(status, sort_keys=True), flush=True)
+        raise RuntimeError("Validated grasp region configuration has no regions")
     return regions
 
 
@@ -862,10 +1011,20 @@ def select_validated_voxel(region, point, usage):
         max_xyz = finite_vec("voxel.max", bounds.get("max"), 3)
         center = finite_vec("voxel.source_surface_xyz", voxel.get("source_surface_xyz"), 3)
         inside = point_in_box(point, min_xyz, max_xyz)
+        signed_displacement = []
+        for axis in range(3):
+            value = float(point[axis])
+            if value < min_xyz[axis]:
+                signed_displacement.append(value - min_xyz[axis])
+            elif value > max_xyz[axis]:
+                signed_displacement.append(value - max_xyz[axis])
+            else:
+                signed_displacement.append(0.0)
         rows.append({{
             "voxel": voxel,
             "inside": inside,
             "displacement": vec_distance(point, center),
+            "signed_displacement_to_bounds": signed_displacement,
             "surface_center": center,
             "surface_min": min_xyz,
             "surface_max": max_xyz,
@@ -936,6 +1095,13 @@ def select_validated_grasp_region(source_base):
         "validation_scope": region.get("validation_scope"),
         "nearest_region_displacement": float(selected["displacement"]),
         "nearest_voxel_displacement": float(voxel_row["displacement"]) if voxel_row else None,
+        "nearest_voxel": voxel.get("voxel_id") if voxel else None,
+        "nearest_voxel_bounds": {{
+            "min": voxel_row["surface_min"],
+            "max": voxel_row["surface_max"],
+        }} if voxel_row else None,
+        "nearest_voxel_center": voxel_row["surface_center"] if voxel_row else None,
+        "nearest_voxel_signed_displacement_to_bounds": voxel_row["signed_displacement_to_bounds"] if voxel_row else None,
         "hover_height_key": selected["hover_height_key"],
         "selected_tcp_orientation": quat,
         "approach_angle": float(approach_angle),
@@ -966,6 +1132,9 @@ def select_validated_grasp_region(source_base):
         print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
         raise RuntimeError("Validated region approach angle %.3f exceeds max %.3f" % (approach_angle, max_allowed))
     print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
+    if CONFIG.get("grasp_region") == "auto" and not voxel_inside and not CONFIG.get("explore_unvalidated_candidates"):
+        print("SOURCE_OUTSIDE_VALIDATED_VOXEL_JSON " + json.dumps(selection, sort_keys=True), flush=True)
+        raise RuntimeError("Detected source is outside all individually validated grasp voxels; rerun with --explore-unvalidated-candidates for diagnostics only")
     candidate = {{
         "phase": "validated_region",
         "region_name": region.get("name"),
@@ -991,7 +1160,10 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     minimum_link6_transit_z = float(CONFIG["transit_z"])
     candidates = top_down_orientation_candidates(current_tcp_pose)
     validated_candidate, validated_selection = select_validated_grasp_region(source_base)
-    if validated_candidate is not None and validated_selection.get("source_inside_region"):
+    if validated_candidate is not None and (
+        validated_selection.get("source_inside_validated_voxel")
+        or CONFIG.get("explore_unvalidated_candidates")
+    ):
         candidates = [validated_candidate] + candidates
     exact_candidates = [candidate for candidate in candidates if candidate["phase"] == "exact_top_down"]
     tilted_candidates = [candidate for candidate in candidates if candidate["phase"] == "tilted"]
@@ -1007,32 +1179,50 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     ]
     current_orientation_ik = check_pose_ik(planner, pose_msg(control_xyz, current_orientation_quat))
     exact_top_down_ik = check_pose_ik(planner, pose_msg(control_xyz, control_candidate["quat"]))
+    current_orientation_report = {{
+        "success": bool(current_orientation_ik.get("success")),
+        "error": current_orientation_ik.get("error"),
+    }}
+    exact_top_down_report = {{
+        "success": bool(exact_top_down_ik.get("success")),
+        "error": exact_top_down_ik.get("error"),
+    }}
+    if CONFIG.get("verbose_diagnostics"):
+        current_orientation_report["seeds"] = current_orientation_ik.get("seeds", [])
+        exact_top_down_report["seeds"] = exact_top_down_ik.get("seeds", [])
     print("TCP_IK_CONTROL_JSON " + json.dumps({{
         "tcp_xyz": control_xyz,
-        "current_orientation": {{
-            "success": bool(current_orientation_ik.get("success")),
-            "error": current_orientation_ik.get("error"),
-            "seeds": current_orientation_ik.get("seeds", []),
-        }},
-        "exact_top_down_yaw0": {{
-            "success": bool(exact_top_down_ik.get("success")),
-            "error": exact_top_down_ik.get("error"),
-            "seeds": exact_top_down_ik.get("seeds", []),
-        }},
+        "current_orientation": current_orientation_report,
+        "exact_top_down_yaw0": exact_top_down_report,
     }}, sort_keys=True))
 
-    phase_sequence = [
-        ("validated_region", validated_candidates),
-        ("exact_top_down", exact_candidates),
-        ("tilted", tilted_candidates),
-    ]
+    if CONFIG.get("grasp_region") == "auto" and not CONFIG.get("explore_unvalidated_candidates"):
+        phase_sequence = [("validated_region", validated_candidates)]
+    else:
+        phase_sequence = [
+            ("validated_region", validated_candidates),
+            ("exact_top_down", exact_candidates),
+            ("tilted", tilted_candidates),
+        ]
     if CONFIG.get("execute") and validated_candidates:
         phase_sequence = [("validated_region", validated_candidates)]
+    exploratory_started = time.time()
+    exploratory_budget = float(CONFIG.get("exploratory_planning_budget_s", 60.0))
     for phase_name, phase_candidates in phase_sequence:
         phase_had_ik_success = False
         if phase_name == "tilted":
             print("TCP_TILTED_CANDIDATES_START no exact top-down candidate produced a valid planned trajectory")
         for candidate in phase_candidates:
+            if phase_name != "validated_region" and CONFIG.get("explore_unvalidated_candidates"):
+                elapsed = time.time() - exploratory_started
+                if elapsed >= exploratory_budget:
+                    print("EXPLORATORY_PLANNING_BUDGET_JSON " + json.dumps({{
+                        "budget_s": exploratory_budget,
+                        "elapsed_s": elapsed,
+                        "stopped": True,
+                        "attempted_candidates": len(rows),
+                    }}, sort_keys=True), flush=True)
+                    break
             index = len(rows)
             quat = candidate["quat"]
             height_plan = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, candidate)
@@ -1040,10 +1230,11 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
             hover_pose = pose_msg(xyz, quat)
             assert_workspace("source_hover candidate %d" % index, xyz)
             reachability = reachability_diagnostic(xyz, candidate, height_plan["world_link6_to_tcp_translation"])
-            print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
-            print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
+            if CONFIG.get("verbose_diagnostics"):
+                print("TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
+                print("TCP_REACHABILITY_CANDIDATE_JSON " + json.dumps(reachability, sort_keys=True))
             ik_result = check_pose_ik(planner, hover_pose, candidate.get("seed_joint_state"))
-            print("TCP_IK_CANDIDATE_JSON " + json.dumps({{
+            ik_report = {{
                 "index": index,
                 "phase": phase_name,
                 "yaw_rad": float(candidate["yaw_rad"]),
@@ -1052,8 +1243,10 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
                 "success": bool(ik_result.get("success")),
                 "error": ik_result.get("error"),
                 "available": bool(ik_result.get("available")),
-                "seeds": ik_result.get("seeds", []),
-            }}, sort_keys=True))
+            }}
+            if CONFIG.get("verbose_diagnostics"):
+                ik_report["seeds"] = ik_result.get("seeds", [])
+            print("TCP_IK_CANDIDATE_JSON " + json.dumps(ik_report, sort_keys=True))
             phase_had_ik_success = phase_had_ik_success or bool(ik_result.get("success"))
             planner.set_start_state_to_current_state()
             if candidate.get("phase") == "validated_region" and ik_result.get("success"):
@@ -1339,7 +1532,15 @@ def source_from_perception(source):
                     candidate.get("translation_base"),
                     width,
                     inst.get("confidence", 0.0),
-                    {{"instance": inst, "selected_grasp": candidate}},
+                    {{
+                        "instance": inst,
+                        "selected_grasp": candidate,
+                        "coordinate_semantics": {{
+                            "selected_base_field": "selected_grasp.translation_base",
+                            "meaning": "AnyGrasp geometric grasp center transformed to base_link; not the retreat pose and not a table surface point",
+                            "source": "GraspSDK.get_grasp_pose",
+                        }},
+                    }},
                 )
     raise RuntimeError(
         "No source grasp with valid width 0.0 < width <= %.4f m for %s"
@@ -1483,7 +1684,34 @@ def visual_verify(source_base, destination_base):
 
 
 clear_display_trajectory()
-print("PIPER_MANIPULATION_TASK " + json.dumps(CONFIG, sort_keys=True))
+task_status = {{
+    key: CONFIG.get(key)
+    for key in (
+        "task",
+        "source",
+        "destination",
+        "plan_only",
+        "perception_only",
+        "execute",
+        "source_provider",
+        "grasp_region",
+        "hover_height",
+        "explore_unvalidated_candidates",
+        "exploratory_planning_budget_s",
+    )
+}}
+region_data = CONFIG.get("validated_grasp_region_data") or {{}}
+task_status["validated_region_config"] = {{
+    "embedded": bool(region_data.get("embedded")),
+    "schema_version": region_data.get("schema_version"),
+    "region_count": int(region_data.get("region_count") or 0),
+    "voxel_count": int(region_data.get("voxel_count") or 0),
+    "source_path": region_data.get("source_path"),
+}}
+if CONFIG.get("verbose_diagnostics"):
+    print("PIPER_MANIPULATION_TASK_VERBOSE_JSON " + json.dumps(CONFIG, sort_keys=True))
+else:
+    print("PIPER_MANIPULATION_TASK_JSON " + json.dumps(task_status, sort_keys=True))
 print("MOTION_PROFILE_JSON " + json.dumps({{
     "velocity_scaling": CONFIG["velocity_scaling"],
     "acceleration_scaling": CONFIG["acceleration_scaling"],
@@ -1516,6 +1744,26 @@ source_detection = select_source()
 source_camera = source_detection["camera_xyz"]
 source_base = source_detection["base_xyz"]
 width = float(source_detection["width_m"])
+selected_grasp = (source_detection.get("metadata") or {{}}).get("selected_grasp") or {{}}
+source_summary = {{
+    "label": source_detection.get("label"),
+    "confidence": source_detection.get("confidence"),
+    "selected_camera_xyz": source_camera,
+    "selected_base_xyz": source_base,
+    "selected_width": width,
+    "selected_score": selected_grasp.get("score"),
+    "candidate_count": len(((source_detection.get("metadata") or {{}}).get("instance") or {{}}).get("grasps", [])),
+    "provider": source_detection.get("provider"),
+}}
+print("SOURCE_DETECTION_SUMMARY_JSON " + json.dumps(source_summary, sort_keys=True), flush=True)
+print("SOURCE_COORDINATE_SEMANTICS_JSON " + json.dumps({{
+    "provider": source_detection.get("provider"),
+    "selected_source_base_field": "selected_grasp.translation_base" if source_detection.get("provider") == "perception" else "provider_base_xyz",
+    "selected_source_meaning": ((source_detection.get("metadata") or {{}}).get("coordinate_semantics") or {{}}).get("meaning", "provider-specific base_link point"),
+    "validated_voxel_field": "source_surface_xyz",
+    "validated_voxel_comparison_semantics": "The stored voxel is compared against the normalized source_base_xyz used by the planner. For perception this is GraspSDK selected_grasp.translation_base, the AnyGrasp geometric grasp center in base_link.",
+    "semantically_equivalent_for_comparison": source_detection.get("provider") in ("perception", "manual", "aruco"),
+}}, sort_keys=True), flush=True)
 gripper_plan = compute_gripper_plan(width, CONFIG["close_width"])
 open_width = float(gripper_plan["open_width_m"])
 close_width = gripper_plan["close_width_m"]
@@ -1533,11 +1781,12 @@ if CONFIG["destination"]:
     destination = detect_destination(CONFIG["destination"])
     destination_base = finite_vec("destination.base_xyz", destination["base_xyz"], 3)
 
-print("SOURCE_DETECTION_JSON " + json.dumps({{
-    **source_detection,
-    "source_camera_xyz": source_camera,
-    "source_base_xyz": source_base,
-}}, sort_keys=True))
+if CONFIG.get("verbose_diagnostics"):
+    print("SOURCE_DETECTION_JSON " + json.dumps({{
+        **source_detection,
+        "source_camera_xyz": source_camera,
+        "source_base_xyz": source_base,
+    }}, sort_keys=True))
 print("source_camera_xyz " + json.dumps(source_camera))
 print("source_base_xyz " + json.dumps(source_base))
 if destination is not None:
@@ -1769,6 +2018,14 @@ def acquire_lease(agent_url: str, holder: str) -> str:
     return lease_id
 
 
+def lease_status(agent_url: str) -> Dict[str, Any]:
+    return http_json("GET", agent_url.rstrip("/") + "/lease/status")
+
+
+def extend_lease(agent_url: str, lease_id: str) -> Dict[str, Any]:
+    return http_json("POST", agent_url.rstrip("/") + "/lease/extend", {"lease_id": lease_id})
+
+
 def release_lease(agent_url: str, lease_id: str) -> None:
     try:
         data = http_json("POST", agent_url.rstrip("/") + "/lease/release", {"lease_id": lease_id})
@@ -1779,6 +2036,22 @@ def release_lease(agent_url: str, lease_id: str) -> None:
 
 def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, verbose_result: bool = False) -> int:
     base = agent_url.rstrip("/")
+    status_before = lease_status(agent_url)
+    lease_config = status_before.get("config") or {}
+    max_duration = float(lease_config.get("max_duration_s", 0.0) or 0.0)
+    idle_timeout = float(lease_config.get("idle_timeout_s", 0.0) or 0.0)
+    duration_preflight = {
+        "requested_timeout_s": float(timeout),
+        "lease_max_duration_s": max_duration,
+        "lease_idle_timeout_s": idle_timeout,
+        "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
+    }
+    print("LEASE_DURATION_PREFLIGHT_JSON " + json.dumps(duration_preflight, sort_keys=True), flush=True)
+    if max_duration > 0.0 and float(timeout) > max_duration:
+        raise RuntimeError(
+            "Requested execution timeout %.1fs exceeds lease max duration %.1fs"
+            % (float(timeout), max_duration)
+        )
     validation = http_json("POST", base + "/code/validate", {"code": code})
     if not validation.get("valid"):
         raise RuntimeError("Code validation failed: " + json.dumps(validation, indent=2))
@@ -1795,8 +2068,16 @@ def submit_and_stream(agent_url: str, lease_id: str, code: str, timeout: float, 
     stdout_offset = 0
     stderr_offset = 0
     status = "running"
+    last_heartbeat = 0.0
     while status not in TERMINAL_STATUSES:
         time.sleep(1.0)
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
+            heartbeat = extend_lease(agent_url, lease_id)
+            print("LEASE_HEARTBEAT_JSON " + json.dumps(heartbeat, sort_keys=True), flush=True)
+            if heartbeat.get("status") == "not_found":
+                raise RuntimeError("Lease heartbeat failed: lease not found")
+            last_heartbeat = now
         state = http_json(
             "GET",
             f"{base}/code/status?stdout_offset={stdout_offset}&stderr_offset={stderr_offset}",
@@ -1882,6 +2163,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-grasp-tilt", type=float, default=25.0)
     parser.add_argument("--visualize-candidates", action="store_true")
+    parser.add_argument("--verbose-diagnostics", action="store_true")
+    parser.add_argument(
+        "--explore-unvalidated-candidates",
+        action="store_true",
+        help="Plan-only diagnostic search outside validated voxels; never weakens execute gating",
+    )
+    parser.add_argument("--exploratory-planning-budget", type=float, default=60.0)
     parser.add_argument("--aruco-frame", default="aruco_marker_frame")
     parser.add_argument("--aruco-offset-x", type=float, default=0.0)
     parser.add_argument("--aruco-offset-y", type=float, default=0.0)
@@ -1930,6 +2218,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--close-width must be greater than 0")
     if args.max_grasp_tilt <= 0.0 or args.max_grasp_tilt > 30.0:
         parser.error("--max-grasp-tilt must be in (0, 30]")
+    if args.exploratory_planning_budget <= 0.0:
+        parser.error("--exploratory-planning-budget must be greater than 0")
+    if args.execute and args.explore_unvalidated_candidates:
+        parser.error("--explore-unvalidated-candidates is only allowed for plan-only diagnostics")
     if args.execute:
         args.plan_only = False
     return args
