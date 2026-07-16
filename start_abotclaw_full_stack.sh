@@ -46,10 +46,12 @@ trap 'echo "ERROR: failed during stage: ${stage}" >&2' ERR
 
 usage() {
     cat <<'EOF'
-Usage: ./start_abotclaw_full_stack.sh [--status]
+Usage: ./start_abotclaw_full_stack.sh [--restart] [--status] [--stop]
 
   (no args)   Start/reuse the full ABot-Claw Piper stack.
+  --restart   Fully stop local/remote ABot-Claw processes, then start fresh.
   --status    Inspect and print status only. Does not start services or edit routes.
+  --stop      Stop ABot-Claw tmux sessions and related local/remote service processes.
 EOF
 }
 
@@ -237,6 +239,103 @@ preflight() {
     fi
 }
 
+kill_tmux_session_if_running() {
+    local session="$1"
+    if tmux has-session -t "${session}" 2>/dev/null; then
+        log "Killing tmux session ${session}."
+        tmux kill-session -t "${session}" 2>/dev/null || true
+    fi
+}
+
+stop_local_container_processes() {
+    if ! docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! docker_running; then
+        return 0
+    fi
+    log "Stopping local ABot-Claw ROS/Agent/vision processes inside ${CONTAINER}."
+    container_exec '
+patterns=(
+  "[p]ython3 server.py --port 8888"
+  "[p]iper_ctrl_single_node.py"
+  "[p]iper_joint_state_relay.py"
+  "[p]iper_trajectory_bridge.py"
+  "[r]ealsense_d555_py_publisher.py"
+  "[r]ealsense2_camera"
+  "[f]ake_aligned_depth_from_raw.py"
+  "[j]oint_moveit_ctrl_server.py"
+  "[m]ove_group"
+  "[r]obot_state_publisher"
+  "[r]viz"
+  "[i]mage_proc"
+  "[a]ruco_ros"
+  "[r]oslaunch easy_handeye"
+  "[e]asy_handeye"
+  "[r]oscore"
+  "[r]osmaster"
+  "[r]osout"
+)
+for pat in "${patterns[@]}"; do pkill -f "$pat" || true; done
+'
+}
+
+stop_remote_perception_processes() {
+    if ! ssh_remote "true"; then
+        return 0
+    fi
+    log "Stopping remote YOLO/Grasp processes on ${REMOTE_HOST}."
+    ssh_remote "docker exec '${REMOTE_YOLO_CONTAINER}' bash -lc '
+pkill -f \"service_layer/YOLO/main.py|service_layer/GraspAnything/main.py|grasp_service_depth_fallback.py|yolo_stream\" || true
+' 2>/dev/null || true"
+}
+
+restart_remote_container_if_available() {
+    if ! ssh_remote "true"; then
+        log "Remote ${REMOTE_HOST} is not reachable; skipping remote Docker restart."
+        return 0
+    fi
+    if ssh_remote "docker inspect '${REMOTE_YOLO_CONTAINER}' >/dev/null 2>&1"; then
+        log "Restarting remote Docker container ${REMOTE_YOLO_CONTAINER} on ${REMOTE_HOST}."
+        ssh_remote "docker restart '${REMOTE_YOLO_CONTAINER}' >/dev/null" || true
+    fi
+}
+
+restart_openclaw_gateway_if_available() {
+    if command -v openclaw >/dev/null 2>&1; then
+        log "Restarting OpenClaw gateway."
+        openclaw gateway restart 2>&1 | tee -a "${LOG_DIR}/openclaw.log" || true
+    fi
+}
+
+stop_everything() {
+    stage="full-stack stop"
+    mkdir -p "${LOG_DIR}"
+    kill_tmux_session_if_running "${SESSION}"
+    kill_tmux_session_if_running "${LOWER_SESSION}"
+    stop_local_container_processes
+    stop_remote_perception_processes
+    if command -v openclaw >/dev/null 2>&1; then
+        openclaw gateway stop 2>&1 | tee -a "${LOG_DIR}/openclaw.log" || true
+    fi
+    log "Stop complete. No robot motion commands were sent."
+}
+
+restart_everything() {
+    stage="full-stack restart"
+    mkdir -p "${LOG_DIR}"
+    kill_tmux_session_if_running "${SESSION}"
+    kill_tmux_session_if_running "${LOWER_SESSION}"
+    stop_local_container_processes
+    stop_remote_perception_processes
+    if docker container inspect "${CONTAINER}" >/dev/null 2>&1; then
+        log "Restarting local Docker container ${CONTAINER}."
+        docker restart "${CONTAINER}" >/dev/null
+    fi
+    restart_remote_container_if_available
+    restart_openclaw_gateway_if_available
+}
+
 route_status() {
     local route
     route="$(ip route get "${REMOTE_HOST}" 2>/dev/null || true)"
@@ -362,8 +461,8 @@ start_lower_stack() {
         log "Lower Piper stack is already healthy; not restarting ${LOWER_SESSION}."
         return 0
     fi
-    log "Starting lower Piper stack via start_abotclaw_all.sh --restart --no-attach."
-    (cd "${REPO_DIR}" && ./start_abotclaw_all.sh --restart --no-attach)
+    log "Starting lower Piper stack via start_abotclaw_all.sh --lower-only --restart --no-attach."
+    (cd "${REPO_DIR}" && ./start_abotclaw_all.sh --lower-only --restart --no-attach)
     wait_until "ROS master" 60 1 ros_ready || true
     wait_until "/joint_states_single" 60 1 topic_ready /joint_states_single || true
     wait_until "/move_group" 90 1 node_ready /move_group || true
@@ -957,14 +1056,30 @@ EOF
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --restart) MODE="restart" ;;
             --status) MODE="status" ;;
+            --stop) MODE="stop" ;;
+            --no-attach|--detach) ;;
             -h|--help) usage; exit 0 ;;
             *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
         esac
         shift
     done
 
+    if [[ "${MODE}" == "stop" ]]; then
+        require_cmd docker
+        require_cmd tmux
+        require_cmd ssh
+        require_cmd curl
+        stop_everything
+        exit 0
+    fi
     preflight
+    if [[ "${MODE}" == "restart" ]]; then
+        restart_everything
+        MODE="start"
+        preflight
+    fi
     if [[ "${MODE}" != "status" ]]; then
         ensure_lan_route || true
         ensure_full_tmux

@@ -99,6 +99,21 @@ class PiperTrajectoryBridge:
         result.error_string = message
         (server or self.server).set_aborted(result, message)
 
+    def make_arm_command(self, positions) -> JointState:
+        command = JointState()
+        command.header.stamp = rospy.Time.now()
+        command.name = list(ARM_JOINTS)
+        command.position = list(positions)
+        command.velocity = [0.0] * len(ARM_JOINTS) + [self.effective_hardware_speed_percent()]
+        return command
+
+    def final_position_reached(self, target_positions) -> bool:
+        return all(
+            name in self.latest_positions
+            and abs(self.latest_positions[name] - target) <= self.feedback_tolerance_rad
+            for name, target in zip(ARM_JOINTS, target_positions)
+        )
+
     def wait_for_final_position(self, target_positions) -> bool:
         deadline = rospy.Time.now() + rospy.Duration(self.feedback_timeout_s)
         rate = rospy.Rate(50)
@@ -106,13 +121,55 @@ class PiperTrajectoryBridge:
             if self.server.is_preempt_requested():
                 self.server.set_preempted(text="Trajectory preempted")
                 return False
-            if all(
-                name in self.latest_positions
-                and abs(self.latest_positions[name] - target) <= self.feedback_tolerance_rad
-                for name, target in zip(ARM_JOINTS, target_positions)
-            ):
+            if self.final_position_reached(target_positions):
                 return True
             rate.sleep()
+        return False
+
+    def hold_final_target_until_reached(self, target_positions) -> bool:
+        """Keep the accepted final target active while waiting for hardware feedback."""
+        deadline = rospy.Time.now() + rospy.Duration(self.feedback_timeout_s)
+        rate_hz = max(1.0, float(self.trajectory_command_rate_hz))
+        rate = rospy.Rate(rate_hz)
+        command_count = 0
+        last_log_time = rospy.Time.now()
+        final_command = self.make_arm_command(target_positions)
+
+        while not rospy.is_shutdown() and rospy.Time.now() < deadline:
+            if self.server.is_preempt_requested():
+                self.server.set_preempted(text="Trajectory preempted")
+                return False
+            if self.final_position_reached(target_positions):
+                rospy.loginfo(
+                    "Piper final target reached while held: commands=%d final_feedback=%s",
+                    command_count,
+                    [
+                        None if self.latest_positions.get(name) is None
+                        else round(float(self.latest_positions.get(name)), 6)
+                        for name in ARM_JOINTS
+                    ],
+                )
+                return True
+
+            final_command.header.stamp = rospy.Time.now()
+            self.command_publisher.publish(final_command)
+            command_count += 1
+
+            now = rospy.Time.now()
+            if (now - last_log_time).to_sec() >= 5.0:
+                last_log_time = now
+                rospy.loginfo(
+                    "Holding Piper final target: commands=%d target=%s feedback=%s",
+                    command_count,
+                    [round(float(value), 6) for value in target_positions],
+                    [
+                        None if self.latest_positions.get(name) is None
+                        else round(float(self.latest_positions.get(name)), 6)
+                        for name in ARM_JOINTS
+                    ],
+                )
+            rate.sleep()
+
         return False
 
     def get_gripper_position(self):
@@ -201,12 +258,7 @@ class PiperTrajectoryBridge:
                     return
                 rospy.sleep(0.002)
 
-            command = JointState()
-            command.header.stamp = rospy.Time.now()
-            command.name = list(ARM_JOINTS)
-            command.position = list(point.positions)
-            command.velocity = [0.0] * len(ARM_JOINTS) + [self.effective_hardware_speed_percent()]
-            self.command_publisher.publish(command)
+            self.command_publisher.publish(self.make_arm_command(point.positions))
 
             feedback = FollowJointTrajectoryFeedback()
             feedback.joint_names = list(ARM_JOINTS)
@@ -226,7 +278,7 @@ class PiperTrajectoryBridge:
             ],
         )
 
-        if self.arm_require_feedback and not self.wait_for_final_position(trajectory.points[-1].positions):
+        if self.arm_require_feedback and not self.hold_final_target_until_reached(trajectory.points[-1].positions):
             result.error_code = FollowJointTrajectoryResult.GOAL_TOLERANCE_VIOLATED
             result.error_string = "Timed out waiting for Piper joint feedback at final trajectory point"
             self.server.set_aborted(result, result.error_string)
