@@ -1063,6 +1063,11 @@ def point_in_box(point, min_xyz, max_xyz):
     return all(float(min_xyz[i]) <= float(point[i]) <= float(max_xyz[i]) for i in range(3))
 
 
+def point_in_box_with_tolerance(point, min_xyz, max_xyz, tolerance_m):
+    tol = float(tolerance_m)
+    return all(float(min_xyz[i]) - tol <= float(point[i]) <= float(max_xyz[i]) + tol for i in range(3))
+
+
 def voxel_source_comparison_geometry(voxel):
     bounds = voxel.get("source_surface_bounds") or {{}}
     surface_min = finite_vec("voxel.source_surface_bounds.min", bounds.get("min"), 3)
@@ -1095,6 +1100,7 @@ def voxel_source_comparison_geometry(voxel):
 def select_validated_voxel(region, point, usage):
     voxels = region.get("validated_voxels") or []
     rows = []
+    tolerance_m = 0.005
     for voxel in voxels:
         if usage not in (voxel.get("usage") or []):
             continue
@@ -1103,6 +1109,7 @@ def select_validated_voxel(region, point, usage):
         max_xyz = geometry["comparison_max"]
         center = geometry["comparison_center"]
         inside = point_in_box(point, min_xyz, max_xyz)
+        inside_with_tolerance = point_in_box_with_tolerance(point, min_xyz, max_xyz, tolerance_m)
         signed_displacement = []
         for axis in range(3):
             value = float(point[axis])
@@ -1115,8 +1122,10 @@ def select_validated_voxel(region, point, usage):
         rows.append({{
             "voxel": voxel,
             "inside": inside,
+            "inside_with_tolerance": inside_with_tolerance,
             "displacement": vec_distance(point, center),
             "signed_displacement_to_bounds": signed_displacement,
+            "comparison_tolerance_m": tolerance_m,
             "surface_center": geometry["surface_center"],
             "surface_min": geometry["surface_min"],
             "surface_max": geometry["surface_max"],
@@ -1126,7 +1135,7 @@ def select_validated_voxel(region, point, usage):
             "grasp_depth_m": geometry["grasp_depth_m"],
             "comparison_semantics": geometry["comparison_semantics"],
         }})
-    rows.sort(key=lambda row: (not row["inside"], row["displacement"]))
+    rows.sort(key=lambda row: (not row["inside_with_tolerance"], row["displacement"]))
     return rows[0] if rows else None
 
 
@@ -1171,7 +1180,8 @@ def select_validated_grasp_region(source_base):
     region = selected["region"]
     voxel_row = select_validated_voxel(region, point, "source_pick")
     voxel = voxel_row["voxel"] if voxel_row else None
-    voxel_inside = bool(voxel_row and voxel_row["inside"])
+    voxel_inside_exact = bool(voxel_row and voxel_row["inside"])
+    voxel_inside = bool(voxel_row and voxel_row["inside_with_tolerance"])
     selected_source = voxel if voxel_inside else region
     quat_key = "tcp_quaternion" if voxel_inside else "representative_tcp_quaternion"
     quat = finite_vec("region.tcp_quaternion", selected_source.get(quat_key), 4)
@@ -1188,6 +1198,8 @@ def select_validated_grasp_region(source_base):
         "selected_voxel": voxel.get("voxel_id") if voxel else None,
         "source_inside_region": bool(selected["inside"]),
         "source_inside_validated_voxel": voxel_inside,
+        "source_inside_validated_voxel_exact": voxel_inside_exact,
+        "source_inside_validated_voxel_with_tolerance": voxel_inside,
         "region_execution_validated": bool(region.get("execution_validated", False)),
         "validation_scope": region.get("validation_scope"),
         "nearest_region_displacement": float(selected["displacement"]),
@@ -1205,6 +1217,7 @@ def select_validated_grasp_region(source_base):
         "nearest_voxel_comparison_center": voxel_row["comparison_center"] if voxel_row else None,
         "nearest_voxel_grasp_depth_m": voxel_row["grasp_depth_m"] if voxel_row else None,
         "nearest_voxel_comparison_semantics": voxel_row["comparison_semantics"] if voxel_row else None,
+        "nearest_voxel_comparison_tolerance_m": voxel_row["comparison_tolerance_m"] if voxel_row else None,
         "nearest_voxel_signed_displacement_to_bounds": voxel_row["signed_displacement_to_bounds"] if voxel_row else None,
         "hover_height_key": selected["hover_height_key"],
         "selected_tcp_orientation": quat,
