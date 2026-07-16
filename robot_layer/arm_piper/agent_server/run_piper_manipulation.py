@@ -98,6 +98,9 @@ def build_robot_code(args: argparse.Namespace) -> str:
         "source_width": args.source_width,
         "close_width": args.close_width,
         "source_xyz": [args.source_x, args.source_y, args.source_z],
+        "grasp_region": args.grasp_region,
+        "grasp_region_config": args.grasp_region_config,
+        "max_grasp_tilt": args.max_grasp_tilt,
         "aruco_frame": args.aruco_frame,
         "aruco_offset_xyz": [args.aruco_offset_x, args.aruco_offset_y, args.aruco_offset_z],
         "top_k": args.top_k,
@@ -117,12 +120,14 @@ def build_robot_code(args: argparse.Namespace) -> str:
     return f"""
 import json
 import math
+import os
 import time
 import xml.etree.ElementTree as ET
 
 import cv2
 import numpy as np
 import rospy
+import yaml
 from geometry_msgs.msg import Point, Pose, PoseStamped
 from moveit_commander import MoveGroupCommander
 from moveit_msgs.msg import MoveItErrorCodes, RobotState
@@ -158,6 +163,13 @@ def unit_vec(name, values):
     if norm <= 1e-9:
         raise RuntimeError(name + " has zero length")
     return vec / norm
+
+
+def angle_to_down_deg(vector):
+    vec = unit_vec("approach_axis", vector)
+    down = np.array([0.0, 0.0, -1.0], dtype=float)
+    dot = max(-1.0, min(1.0, float(np.dot(vec, down))))
+    return math.degrees(math.acos(dot))
 
 
 def rot_to_quat_xyzw(rot):
@@ -237,7 +249,8 @@ def compute_top_down_tcp_orientation(closing_target_axis=None):
 def top_down_orientation_candidates(current_tcp_pose):
     candidates = []
     exact_yaw_degrees = [0.0, 45.0, 90.0, 135.0, 180.0, -45.0, -90.0, -135.0]
-    tilt_degrees = [5.0, 10.0, 15.0, 20.0]
+    max_tilt = float(CONFIG.get("max_grasp_tilt", 25.0))
+    tilt_degrees = [value for value in [5.0, 10.0, 15.0, 20.0, 25.0] if value <= max_tilt + 1e-9]
 
     for yaw_deg in exact_yaw_degrees:
         yaw = math.radians(yaw_deg)
@@ -652,7 +665,10 @@ def tcp_height_plan(source_z, hover_height, minimum_link6_transit_z, candidate):
     world_link6_to_tcp = rot.dot(np.asarray(LINK6_TO_TCP_TRANSLATION, dtype=float))
     tcp_z_from_object_clearance = float(source_z) + float(hover_height)
     tcp_z_from_link6_clearance = float(minimum_link6_transit_z) + float(world_link6_to_tcp[2])
-    selected_tcp_hover_z = max(tcp_z_from_object_clearance, tcp_z_from_link6_clearance)
+    if candidate.get("phase") == "validated_region":
+        selected_tcp_hover_z = tcp_z_from_object_clearance
+    else:
+        selected_tcp_hover_z = max(tcp_z_from_object_clearance, tcp_z_from_link6_clearance)
     return {{
         "source_surface_z": float(source_z),
         "hover_height": float(hover_height),
@@ -660,6 +676,7 @@ def tcp_height_plan(source_z, hover_height, minimum_link6_transit_z, candidate):
         "tcp_z_from_object_clearance": tcp_z_from_object_clearance,
         "tcp_z_from_link6_clearance": tcp_z_from_link6_clearance,
         "selected_tcp_hover_z": selected_tcp_hover_z,
+        "validated_region_tcp_height": bool(candidate.get("phase") == "validated_region"),
         "world_link6_to_tcp_translation": [float(x) for x in world_link6_to_tcp.tolist()],
     }}
 
@@ -680,14 +697,141 @@ def reachability_diagnostic(tcp_xyz, candidate, world_link6_to_tcp):
     }}
 
 
+def load_validated_grasp_regions():
+    if CONFIG.get("grasp_region") != "auto":
+        return []
+    path = CONFIG.get("grasp_region_config")
+    if not path:
+        return []
+    if not os.path.exists(path):
+        print("VALIDATED_GRASP_REGION_CONFIG_MISSING " + path)
+        return []
+    with open(path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {{}}
+    regions = data.get("regions") or []
+    if not isinstance(regions, list):
+        raise RuntimeError("Validated grasp region file has invalid regions list: " + path)
+    return regions
+
+
+def vec_distance(a, b):
+    aa = np.asarray(a, dtype=float)
+    bb = np.asarray(b, dtype=float)
+    return float(np.linalg.norm(aa - bb))
+
+
+def region_for_hover_height(region):
+    surfaces = region.get("cup_surface_regions") or {{}}
+    if not surfaces:
+        return None, None
+    hover = float(CONFIG.get("hover_height", 0.10))
+    best_key = min(surfaces.keys(), key=lambda key: abs(float(key) - hover))
+    return str(best_key), surfaces[best_key]
+
+
+def point_in_box(point, min_xyz, max_xyz):
+    return all(float(min_xyz[i]) <= float(point[i]) <= float(max_xyz[i]) for i in range(3))
+
+
+def select_validated_grasp_region(source_base):
+    regions = load_validated_grasp_regions()
+    if not regions:
+        selection = {{
+            "enabled": CONFIG.get("grasp_region") == "auto",
+            "detected_source_xyz": [float(x) for x in source_base],
+            "selected_region": None,
+            "source_inside_region": False,
+            "nearest_region_displacement": None,
+            "reason": "no validated regions loaded",
+        }}
+        print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
+        return None, selection
+
+    rows = []
+    point = [float(x) for x in source_base]
+    for region in regions:
+        hover_key, surface = region_for_hover_height(region)
+        if not surface:
+            continue
+        min_xyz = finite_vec("region.min", surface.get("min"), 3)
+        max_xyz = finite_vec("region.max", surface.get("max"), 3)
+        center = finite_vec("region.center", surface.get("center"), 3)
+        inside = point_in_box(point, min_xyz, max_xyz)
+        displacement = vec_distance(point, center)
+        rows.append({{
+            "region": region,
+            "hover_height_key": hover_key,
+            "inside": inside,
+            "displacement": displacement,
+            "surface_center": center,
+            "surface_min": min_xyz,
+            "surface_max": max_xyz,
+        }})
+    if not rows:
+        raise RuntimeError("Validated grasp region file contains no usable cup surface regions")
+    rows.sort(key=lambda row: (not row["inside"], row["displacement"]))
+    selected = rows[0]
+    region = selected["region"]
+    quat = finite_vec("region.representative_tcp_quaternion", region.get("representative_tcp_quaternion"), 4)
+    rot = quat_to_rot_xyzw(quat)
+    approach = rot.dot(unit_vec("tcp_local_approach_axis", TCP_LOCAL_APPROACH_AXIS))
+    closing = rot.dot(unit_vec("tcp_local_closing_axis", TCP_LOCAL_CLOSING_AXIS))
+    approach_angle = angle_to_down_deg(approach)
+    allowed = region.get("allowed_approach_angle_deg") or [0.0, float(CONFIG.get("max_grasp_tilt", 25.0))]
+    max_allowed = min(float(allowed[-1]), float(CONFIG.get("max_grasp_tilt", 25.0)))
+    selection = {{
+        "enabled": True,
+        "detected_source_xyz": point,
+        "selected_region": region.get("name"),
+        "source_inside_region": bool(selected["inside"]),
+        "nearest_region_displacement": float(selected["displacement"]),
+        "hover_height_key": selected["hover_height_key"],
+        "selected_tcp_orientation": quat,
+        "approach_angle": float(approach_angle),
+        "selected_seed_joint_state": region.get("representative_joint_state"),
+        "region_surface_center": selected["surface_center"],
+        "region_surface_min": selected["surface_min"],
+        "region_surface_max": selected["surface_max"],
+        "transit_result": None,
+        "descend_fraction": None,
+        "lift_fraction": None,
+    }}
+    if CONFIG.get("execute") and not selected["inside"]:
+        print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
+        raise RuntimeError("Execute refused: detected source is outside all validated grasp regions")
+    if approach_angle > max_allowed + 1e-6:
+        print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
+        raise RuntimeError("Validated region approach angle %.3f exceeds max %.3f" % (approach_angle, max_allowed))
+    print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(selection, sort_keys=True))
+    candidate = {{
+        "phase": "validated_region",
+        "region_name": region.get("name"),
+        "yaw_rad": math.radians(float(region.get("closing_axis_yaw_range_deg", [0.0, 0.0])[0])),
+        "yaw_deg": float(region.get("closing_axis_yaw_range_deg", [0.0, 0.0])[0]),
+        "tilt_deg": float(approach_angle),
+        "closing_axis": [float(x) for x in closing.tolist()],
+        "quat": quat,
+        "approach_axis": [float(x) for x in approach.tolist()],
+        "target_closing_axis": [float(x) for x in closing.tolist()],
+        "approach_angle_deg": float(approach_angle),
+        "seed_joint_state": region.get("representative_joint_state"),
+        "validated_region_selection": selection,
+    }}
+    return candidate, selection
+
+
 def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
     rows = []
     hover_height = float(CONFIG["hover_height"])
     minimum_link6_transit_z = float(CONFIG["transit_z"])
     candidates = top_down_orientation_candidates(current_tcp_pose)
+    validated_candidate, validated_selection = select_validated_grasp_region(source_base)
+    if validated_candidate is not None and validated_selection.get("source_inside_region"):
+        candidates = [validated_candidate] + candidates
     exact_candidates = [candidate for candidate in candidates if candidate["phase"] == "exact_top_down"]
     tilted_candidates = [candidate for candidate in candidates if candidate["phase"] == "tilted"]
-    control_candidate = exact_candidates[0]
+    validated_candidates = [candidate for candidate in candidates if candidate["phase"] == "validated_region"]
+    control_candidate = (validated_candidates or exact_candidates)[0]
     control_height = tcp_height_plan(source_base[2], hover_height, minimum_link6_transit_z, control_candidate)
     control_xyz = [source_base[0], source_base[1], control_height["selected_tcp_hover_z"]]
     current_orientation_quat = [
@@ -712,7 +856,11 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
         }},
     }}, sort_keys=True))
 
-    for phase_name, phase_candidates in [("exact_top_down", exact_candidates), ("tilted", tilted_candidates)]:
+    for phase_name, phase_candidates in [
+        ("validated_region", validated_candidates),
+        ("exact_top_down", exact_candidates),
+        ("tilted", tilted_candidates),
+    ]:
         phase_had_ik_success = False
         if phase_name == "tilted":
             print("TCP_TILTED_CANDIDATES_START no exact top-down candidate produced a valid planned trajectory")
@@ -739,21 +887,14 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
                 "seeds": ik_result.get("seeds", []),
             }}, sort_keys=True))
             phase_had_ik_success = phase_had_ik_success or bool(ik_result.get("success"))
-            summary = {{
-                "success": False,
-                "error": "SKIPPED_NO_IK",
-                "points": 0,
-            }}
-            trajectory = None
-            if ik_result.get("success"):
-                planner.set_start_state_to_current_state()
-                trajectory, summary = plan_target(
-                    planner,
-                    "transit_to_source_hover_yaw_%d" % index,
-                    xyz,
-                    quat,
-                    raise_on_failure=False,
-                )
+            planner.set_start_state_to_current_state()
+            trajectory, summary = plan_target(
+                planner,
+                "transit_to_source_hover_yaw_%d" % index,
+                xyz,
+                quat,
+                raise_on_failure=False,
+            )
             row = {{
                 "index": index,
                 "phase": phase_name,
@@ -773,6 +914,14 @@ def plan_transit_to_source_hover(planner, source_base, current_tcp_pose):
                 summary["height_plan"] = height_plan
                 summary["reachability"] = reachability
                 summary["ik"] = ik_result
+                if candidate.get("validated_region_selection"):
+                    updated_selection = dict(candidate["validated_region_selection"])
+                    updated_selection["transit_result"] = {{
+                        "success": bool(summary.get("success")),
+                        "points": int(summary.get("points", 0)),
+                        "error": summary.get("error"),
+                    }}
+                    print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(updated_selection, sort_keys=True))
                 print("SELECTED_TCP_YAW_CANDIDATE_JSON " + json.dumps(candidate, sort_keys=True))
                 print("SELECTED_TCP_HEIGHT_PLAN_JSON " + json.dumps(height_plan, sort_keys=True))
                 return trajectory, summary, candidate, hover_pose
@@ -932,15 +1081,14 @@ def source_from_manual():
     if CONFIG["source_width"] is None:
         raise RuntimeError("Manual source provider requires --source-width")
     base_xyz = finite_vec("manual_source.base_xyz", xyz, 3)
-    camera_xyz = base_to_camera_point(base_xyz)
     return normalize_source(
         "manual",
         CONFIG["source"] or "manual-source",
-        camera_xyz,
+        base_xyz,
         base_xyz,
         CONFIG["source_width"],
         1.0,
-        {{"coordinate_frame": grasp._base_frame_id}},
+        {{"coordinate_frame": grasp._base_frame_id, "camera_xyz_note": "manual provider uses base_link coordinates"}},
     )
 
 
@@ -1155,8 +1303,11 @@ target_tcp_quat = yaw_candidate["quat"]
 target_approach_axis = yaw_candidate["approach_axis"]
 target_closing_axis = yaw_candidate["target_closing_axis"]
 approach_angle_deg = yaw_candidate["approach_angle_deg"]
-if approach_angle_deg > 5.0:
-    raise RuntimeError("TCP approach axis is %.3f deg from planning-frame -Z" % approach_angle_deg)
+if approach_angle_deg > float(CONFIG.get("max_grasp_tilt", 25.0)):
+    raise RuntimeError(
+        "TCP approach axis is %.3f deg from planning-frame -Z, above max %.3f"
+        % (approach_angle_deg, float(CONFIG.get("max_grasp_tilt", 25.0)))
+    )
 source_grasp_pose = pose_msg([source_base[0], source_base[1], grasp_z], target_tcp_quat)
 for name, pose in [
     ("source_hover", source_hover_pose),
@@ -1215,6 +1366,16 @@ source_lift_trajectory, source_lift_summary, source_lift_final_state = plan_cart
 )
 plans["source_lift"] = source_lift_trajectory
 summaries.append(source_lift_summary)
+if yaw_candidate.get("validated_region_selection"):
+    validated_result = dict(yaw_candidate["validated_region_selection"])
+    validated_result["transit_result"] = {{
+        "success": bool(transit_summary.get("success")),
+        "points": int(transit_summary.get("points", 0)),
+        "error": transit_summary.get("error"),
+    }}
+    validated_result["descend_fraction"] = float(source_descend_summary.get("fraction", 0.0))
+    validated_result["lift_fraction"] = float(source_lift_summary.get("fraction", 0.0))
+    print("VALIDATED_GRASP_REGION_SELECTION_JSON " + json.dumps(validated_result, sort_keys=True))
 
 transport_name = None
 destination_descend_name = None
@@ -1397,6 +1558,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-y", type=float)
     parser.add_argument("--source-z", type=float)
     parser.add_argument("--close-width", type=float, help="Explicit total physical gripper opening in meters")
+    parser.add_argument("--grasp-region", choices=("auto", "off"), default="auto")
+    parser.add_argument(
+        "--grasp-region-config",
+        default="/home/dase-hw101/ABot-Claw/robot_layer/arm_piper/agent_server/config/piper_validated_grasp_regions.yaml",
+    )
+    parser.add_argument("--max-grasp-tilt", type=float, default=25.0)
     parser.add_argument("--aruco-frame", default="aruco_marker_frame")
     parser.add_argument("--aruco-offset-x", type=float, default=0.0)
     parser.add_argument("--aruco-offset-y", type=float, default=0.0)
@@ -1442,6 +1609,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--source-width must be greater than 0")
     if args.close_width is not None and args.close_width <= 0.0:
         parser.error("--close-width must be greater than 0")
+    if args.max_grasp_tilt <= 0.0 or args.max_grasp_tilt > 30.0:
+        parser.error("--max-grasp-tilt must be in (0, 30]")
     if args.execute:
         args.plan_only = False
     return args
