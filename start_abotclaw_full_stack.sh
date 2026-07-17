@@ -255,29 +255,63 @@ stop_local_container_processes() {
         return 0
     fi
     log "Stopping local ABot-Claw ROS/Agent/vision processes inside ${CONTAINER}."
-    container_exec '
-patterns=(
-  "[p]ython3 server.py --port 8888"
-  "[p]iper_ctrl_single_node.py"
-  "[p]iper_joint_state_relay.py"
-  "[p]iper_trajectory_bridge.py"
-  "[r]ealsense_d555_py_publisher.py"
-  "[r]ealsense2_camera"
-  "[f]ake_aligned_depth_from_raw.py"
-  "[j]oint_moveit_ctrl_server.py"
-  "[m]ove_group"
-  "[r]obot_state_publisher"
-  "[r]viz"
-  "[i]mage_proc"
-  "[a]ruco_ros"
-  "[r]oslaunch easy_handeye"
-  "[e]asy_handeye"
-  "[r]oscore"
-  "[r]osmaster"
-  "[r]osout"
+    container_exec 'python3 - <<'"'"'PY'"'"'
+import os
+import signal
+import time
+
+patterns = (
+    "server.py --port 8888",
+    "piper_ctrl_single_node.py",
+    "piper_joint_state_relay.py",
+    "piper_trajectory_bridge.py",
+    "realsense_d555_py_publisher.py",
+    "realsense2_camera",
+    "fake_aligned_depth_from_raw.py",
+    "joint_moveit_ctrl_server.py",
+    "move_group",
+    "robot_state_publisher",
+    "rviz",
+    "image_proc",
+    "aruco_ros",
+    "roslaunch easy_handeye",
+    "easy_handeye",
+    "roscore",
+    "rosmaster",
+    "rosout",
 )
-for pat in "${patterns[@]}"; do pkill -f "$pat" || true; done
-'
+
+own_pid = os.getpid()
+targets = []
+for pid_text in filter(str.isdigit, os.listdir("/proc")):
+    pid = int(pid_text)
+    if pid == own_pid:
+        continue
+    try:
+        cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "ignore")
+    except OSError:
+        continue
+    if not cmdline or "start_abotclaw_full_stack.sh" in cmdline:
+        continue
+    if any(pattern in cmdline for pattern in patterns):
+        targets.append(pid)
+
+for pid in targets:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+time.sleep(1.0)
+for pid in targets:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        continue
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+PY'
 }
 
 stop_remote_perception_processes() {

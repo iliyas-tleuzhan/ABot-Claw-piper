@@ -136,7 +136,7 @@ ip link show can0
 until rostopic list >/dev/null 2>&1; do sleep 1; done
 rosrun piper piper_ctrl_single_node.py \
   _can_port:=can0 \
-  _auto_enable:=true \
+  _auto_enable:=false \
   _gripper_val_mutiple:=1 \
   _gripper_exist:=true \
   joint_ctrl_single:=/piper_joint_commands
