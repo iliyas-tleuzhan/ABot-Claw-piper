@@ -16,6 +16,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 import torch
@@ -33,7 +34,10 @@ MODEL_TYPE = os.getenv("VLAC_MODEL_TYPE", "internvl2")
 DEVICE_MAP = os.getenv("VLAC_POLICY_DEVICE", os.getenv("VLAC_DEVICE", "cuda:0"))
 MAX_IMAGE_BYTES = int(os.getenv("VLAC_POLICY_MAX_IMAGE_BYTES", "8000000"))
 MAX_REQUEST_BYTES = int(os.getenv("VLAC_POLICY_MAX_REQUEST_BYTES", "26000000"))
-INFERENCE_TIMEOUT_S = float(os.getenv("VLAC_POLICY_TIMEOUT_S", "60"))
+ALLOW_REMOTE_IMAGE_URLS = os.getenv("VLAC_POLICY_ALLOW_REMOTE_IMAGE_URLS", "0") == "1"
+ALLOWED_REMOTE_IMAGE_HOSTS = {host.strip() for host in os.getenv("VLAC_POLICY_ALLOWED_IMAGE_HOSTS", "").split(",") if host.strip()}
+ACTION_SEMANTICS = "unknown_songling_convention"
+GRIPPER_PLACEHOLDER = 0.0
 
 POLICY: Optional[GAC_model] = None
 INFER_LOCK = threading.Lock()
@@ -77,19 +81,24 @@ class ActionPreviewRequest(BaseModel):
 
 
 class ParsedAction(BaseModel):
-    dx_m: Optional[float] = None
-    dy_m: Optional[float] = None
-    dz_m: Optional[float] = None
-    droll_rad: Optional[float] = None
-    dpitch_rad: Optional[float] = None
-    dyaw_rad: Optional[float] = None
-    gripper: Optional[float] = None
+    raw_translation_m: List[Optional[float]] = Field(default_factory=lambda: [None, None, None])
+    raw_rotation_rad: List[Optional[float]] = Field(default_factory=lambda: [None, None, None])
+    gripper_command_raw: Optional[float] = None
+    action_semantics: str = ACTION_SEMANTICS
+    parse_reliability: str = "failed"
+    model_confidence: Optional[float] = None
+    execution_allowed: bool = False
 
 
 def _normalize_image_input(image_input: str) -> Image.Image:
     payload = image_input.strip()
     try:
         if payload.startswith(("http://", "https://")):
+            if not ALLOW_REMOTE_IMAGE_URLS:
+                raise ValueError("remote image URLs are disabled by default")
+            host = urlparse(payload).hostname
+            if not host or host not in ALLOWED_REMOTE_IMAGE_HOSTS:
+                raise ValueError("remote image host is not allowlisted")
             response = requests.get(payload, timeout=15)
             response.raise_for_status()
             data = response.content
@@ -111,7 +120,8 @@ def _si_to_legacy_model_units(state: EndEffectorState) -> List[float]:
     # The bundled vla_example.py describes input state as XYZ in 0.001 mm and
     # RPY in 0.001 degrees. GAC_model.format_state then integer-divides by
     # 1000, producing mm/degrees in the prompt. PiPER gripper units are not
-    # verified for VLAC; preserve metres converted to 0.001 mm and warn.
+    # verified for VLAC, so the service passes an explicit zero placeholder
+    # into format_state instead of inventing a conversion.
     return [
         _finite(state.x_m) * 1_000_000.0,
         _finite(state.y_m) * 1_000_000.0,
@@ -119,7 +129,7 @@ def _si_to_legacy_model_units(state: EndEffectorState) -> List[float]:
         math.degrees(_finite(state.roll_rad)) * 1000.0,
         math.degrees(_finite(state.pitch_rad)) * 1000.0,
         math.degrees(_finite(state.yaw_rad)) * 1000.0,
-        _finite(state.gripper_m) * 1_000_000.0,
+        GRIPPER_PLACEHOLDER,
     ]
 
 
@@ -136,31 +146,31 @@ def _parse_raw_actions(raw: Any) -> tuple[List[ParsedAction], str, List[str]]:
         if all(math.isfinite(v) for v in vals):
             actions.append(
                 ParsedAction(
-                    dx_m=vals[0] / 1000.0,
-                    dy_m=vals[1] / 1000.0,
-                    dz_m=vals[2] / 1000.0,
-                    droll_rad=math.radians(vals[3]),
-                    dpitch_rad=math.radians(vals[4]),
-                    dyaw_rad=math.radians(vals[5]),
-                    gripper=vals[6],
+                    raw_translation_m=[vals[0] / 1000.0, vals[1] / 1000.0, vals[2] / 1000.0],
+                    raw_rotation_rad=[math.radians(vals[3]), math.radians(vals[4]), math.radians(vals[5])],
+                    gripper_command_raw=vals[6],
+                    action_semantics=ACTION_SEMANTICS,
+                    parse_reliability="exact_grammar_match",
+                    model_confidence=None,
+                    execution_allowed=False,
                 )
             )
     if actions:
-        return actions, "high", warnings
+        return actions, "exact_grammar_match", warnings
     nums = [float(v) for v in re.findall(r"[-+]?(?:\d+\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
     if len(nums) >= 7:
-        warnings.append("Parsed numeric action without verified surrounding grammar; units assumed from VLAC prompt mm/degrees.")
+        warnings.append("Parsed numeric action without verified surrounding grammar. Values are preserved as raw Songling-format fields only.")
         return [
             ParsedAction(
-                dx_m=nums[0] / 1000.0,
-                dy_m=nums[1] / 1000.0,
-                dz_m=nums[2] / 1000.0,
-                droll_rad=math.radians(nums[3]),
-                dpitch_rad=math.radians(nums[4]),
-                dyaw_rad=math.radians(nums[5]),
-                gripper=nums[6],
+                raw_translation_m=[nums[0] / 1000.0, nums[1] / 1000.0, nums[2] / 1000.0],
+                raw_rotation_rad=[math.radians(nums[3]), math.radians(nums[4]), math.radians(nums[5])],
+                gripper_command_raw=nums[6],
+                action_semantics=ACTION_SEMANTICS,
+                parse_reliability="assumed_numeric_layout",
+                model_confidence=None,
+                execution_allowed=False,
             )
-        ], "medium", warnings
+        ], "assumed_numeric_layout", warnings
     warnings.append("Could not parse VLAC output into a verified action grammar.")
     return [], "failed", warnings
 
@@ -220,6 +230,7 @@ def health() -> Dict[str, Any]:
         "shadow_mode": True,
         "execution_allowed": False,
         "execution_disabled": True,
+        "inference_interruption_supported": False,
         "gpu": _gpu_info(),
     }
 
@@ -233,13 +244,16 @@ def model_info() -> Dict[str, Any]:
         "gpu": _gpu_info(),
         "expected_camera_count": "1-3",
         "expected_state_representation": "7D end-effector state [x, y, z, roll, pitch, yaw, gripper]",
-        "expected_action_representation": "delta end-effector action {x mm, y mm, z mm, roll degrees, pitch degrees, yaw degrees, open}",
+        "expected_action_representation": "raw Songling-format action text {x mm, y mm, z mm, roll degrees, pitch degrees, yaw degrees, open}",
         "expected_units": {
             "example_input": "XYZ in 0.001 mm, RPY in 0.001 degrees before GAC_model.format_state",
-            "prompt_state_after_format_state": "XYZ in mm, RPY in degrees, gripper unverified",
-            "action_output": "mm/degrees/open according to prompt; action frame is unverified/songling-oriented",
+            "prompt_state_after_format_state": "XYZ in mm, RPY in degrees, gripper placeholder 0.0 with gripper_format=False",
+            "action_output": "raw mm/degrees/open values according to prompt; relative-vs-absolute semantics are not proven",
         },
-        "action_frame": "unknown_songling_end_effector_convention",
+        "action_semantics": ACTION_SEMANTICS,
+        "model_confidence": None,
+        "remote_image_urls_enabled": ALLOW_REMOTE_IMAGE_URLS,
+        "inference_interruption_supported": False,
         "shadow_only": True,
         "execution_allowed": False,
     }
@@ -250,7 +264,12 @@ def action_preview(req: ActionPreviewRequest) -> Dict[str, Any]:
     if POLICY is None:
         raise HTTPException(status_code=503, detail="Policy model not initialized")
     start_t = time.time()
-    warnings: List[str] = ["SHADOW ONLY: model output is not executable", "PiPER action frame and gripper units are not verified"]
+    warnings: List[str] = [
+        "SHADOW ONLY: model output is not executable",
+        "Action semantics remain unknown_songling_convention and are not proven to be relative PiPER deltas",
+        "VLAC gripper input units are unverified; format_state receives a zero placeholder",
+        "Synchronous policy inference cannot currently be interrupted safely once dispatched",
+    ]
     images = [_normalize_image_input(image) for image in req.images]
     legacy_units = _si_to_legacy_model_units(req.end_effector_state)
     formatted_state = POLICY.format_state(legacy_units, gripper_format=False)
@@ -270,22 +289,26 @@ def action_preview(req: ActionPreviewRequest) -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Policy inference failed: {exc}")
     raw_model_output = answers_list[0] if answers_list else ""
-    parsed, confidence, parse_warnings = _parse_raw_actions(raw_model_output)
+    parsed, parse_reliability, parse_warnings = _parse_raw_actions(raw_model_output)
     warnings.extend(parse_warnings)
     return {
-        "success": confidence != "failed",
+        "success": parse_reliability != "failed",
         "model": MODEL_NAME,
         "mode": "shadow_only",
         "execution_allowed": False,
         "task_description": req.task_description,
         "input_state_si": req.end_effector_state.model_dump(),
         "input_state_model_units": legacy_units,
+        "input_state_model_units_note": "Gripper input uses an explicit zero placeholder because VLAC gripper units are unverified",
         "formatted_state_prompt_units": formatted_state,
+        "formatted_state_prompt_units_note": "Values were passed to POLICY.format_state(..., gripper_format=False)",
         "prompt": query,
         "raw_model_output": raw_model_output,
         "all_raw_model_outputs": answers_list,
         "parsed_actions": [item.model_dump() for item in parsed],
-        "parse_confidence": confidence,
+        "parse_reliability": parse_reliability,
+        "model_confidence": None,
+        "action_semantics": ACTION_SEMANTICS,
         "warnings": warnings,
         "latency_ms": (time.time() - start_t) * 1000.0,
         "model_infer_time_s": model_infer_time,
