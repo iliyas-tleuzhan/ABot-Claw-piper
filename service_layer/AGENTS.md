@@ -42,6 +42,12 @@ For each model service, maintain concise docs covering:
 - exact tests performed
 - behavioral conclusion
 
+## Physical VLA Test Handoff
+
+service_layer may support audits, compatibility checks, and shadow inference, but it must stop at a manual physical-test handoff. If a service result is mature enough to justify one bounded hardware check, report one exact user-entered command plus the expected movement, required initial pose, tested model action, completion signal, stop command, and log path.
+
+Do not execute motion during the audit, do not add repeated confirmation flags, and do not let model output choose speed, acceleration, limits, or duration. If frames, normalization, transforms, units, gripper semantics, or command mapping remain unresolved, report the exact calibration or validation step instead of executable motion.
+
 ## Deployment Hygiene
 
 Pin important dependency versions. Prefer intentional cache mounts and conservative restart behavior. Do not mount robot devices, CAN devices, ROS sockets, or the Docker socket into model-service containers.

@@ -95,6 +95,21 @@ Always verify:
 
 Keep model services isolated by separate container, image, port, health endpoint, and pinned source/model revisions. Use intentional cache mounts only. Do not use privileged mode, Docker socket mounts, robot-device mounts, or implicit host access.
 
+## Physical VLA Test Handoff
+
+Use this durable workflow for any model-driven physical test:
+
+1. Codex performs compatibility, mock, replay, saved-input, live read-only, shadow-inference, and planning-only tests itself.
+2. Codex does not execute physical motion during the audit.
+3. When technically justified, the final report provides one exact physical-test command for the user to enter manually.
+4. That report must also provide the expected movement, required initial pose, input/model action being tested, expected completion signal, exact stop command, and resulting log path.
+5. Avoid repeated confirmation arguments. The user's manual command entry is the authorization boundary.
+6. The command must perform one bounded action or short action chunk, never an autonomous indefinite loop.
+7. Retain verified joint/workspace limits, fresh-state validation, finite-value checks, base-stopped requirement, communication-loss stopping, and result logging.
+8. Do not let model output choose speed, acceleration, limits, or duration.
+9. If frame semantics, units, normalization, transforms, gripper semantics, or command mapping remain unknown, provide the exact calibration or validation step instead of inventing executable motion.
+10. Clearly report whether Codex executed no movement, whether a manual command was generated, whether the user later ran it, and whether physical behavior was observed.
+
 ## Git and Filesystem Safety
 
 Always inspect `git status` before editing. Preserve unrelated modified and untracked files.
