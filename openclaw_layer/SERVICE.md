@@ -17,6 +17,7 @@ Update this file first when the service host or port changes.
 | YOLO | Object detection service | `192.168.1.104` | `8013` | `http://192.168.1.104:8013` | `/health`, `/detect` |
 | VLAC | Task progress / completion critic | `192.168.1.104` | `8014` | `http://192.168.1.104:8014` | `/health`, `/critic` |
 | GraspAnything | Grasp proposal / grasp detection service | `192.168.1.104` | `8015` | `http://192.168.1.104:8015` | `/health`, `/grasp/detect` |
+| LAP-3B | Action-policy websocket service for PiPER proof-of-concept action generation | `192.168.1.104` | `8016` | `ws://192.168.1.104:8016` | websocket metadata frame, websocket action inference |
 
 ## Notes
 

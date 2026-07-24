@@ -3,8 +3,6 @@
 This directory contains the core service modules used by ABot-Claw.  
 Use this page as an index of available services, their purpose, and their source repositories.
 
-Durable operating guidance for this repository lives in ../AGENTS.md and ./AGENTS.md. Keep detailed service results in the service docs, and keep persistent agent/service rules in those AGENTS files.
-
 ## Service List
 
 
@@ -13,6 +11,7 @@ Durable operating guidance for this repository lives in ../AGENTS.md and ./AGENT
 | YOLO          | `Services/YOLO`          | Object detection + depth-based distance estimation                    | `main.py`   |
 | GraspAnything | `Services/GraspAnything` | Grasp-oriented detection and grasp-related inference                  | `main.py`   |
 | VLAC          | `Services/VLAC`          | Vision-Language-Action critic inference (progress/completion scoring) | `main.py`   |
+| LAP           | `Services/LAP`           | Official LAP-3B websocket action-policy service for PiPER proof-of-concept action generation | `scripts/serve_policy.py` |
 | SpatialMemory | `Services/SpatialMemory` | Unified spatial memory (object/place/semantic/keyframe memory)        | `main.py`   |
 
 
@@ -45,3 +44,9 @@ Durable operating guidance for this repository lives in ../AGENTS.md and ./AGENT
 - Purpose: Unified memory service for object memory, place memory, semantic frame memory, and keyframe memory, with query APIs.
 - Typical use cases: long-term robot memory, target recall/localization, and task-context retrieval.
 
+### 5) LAP
+
+- Directory: `Services/LAP`
+- Purpose: Wraps the official `lihzha/lap` websocket policy server and `lihzha/LAP-3B` checkpoint for PiPER action-preview inference.
+- Typical use cases: live shadow action generation and one bounded LAP-driven PiPER proof-of-concept action.
+- Source: [https://github.com/lihzha/lap](https://github.com/lihzha/lap)
