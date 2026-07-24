@@ -489,6 +489,9 @@ lower_stack_healthy() {
         && node_ready /robot_state_publisher \
         && param_ready /robot_description \
         && node_ready /move_group \
+        && node_ready /joint_moveit_ctrl_server \
+        && container_ros "rosservice info /joint_moveit_ctrl_arm >/dev/null 2>&1" \
+        && container_ros "rosservice info /joint_moveit_ctrl_piper >/dev/null 2>&1" \
         && [[ "${mgr}" == "moveit_simple_controller_manager/MoveItSimpleControllerManager" ]] \
         && topic_ready /table_camera/color/image_raw \
         && topic_ready /table_camera/aligned_depth_to_color/image_raw \

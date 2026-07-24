@@ -40,6 +40,20 @@ require_command() {
     fi
 }
 
+tmux_window_exists() {
+    tmux list-windows -t "${SESSION}" -F '#W' 2>/dev/null | grep -Fxq "$1"
+}
+
+container_ros() {
+    docker exec "${CONTAINER}" bash -lc "
+        source /opt/ros/noetic/setup.bash
+        source '${ROS_WS}/devel/setup.bash'
+        export ROS_MASTER_URI=http://localhost:11311
+        export ROS_HOSTNAME=localhost
+        $1
+    "
+}
+
 docker_shell() {
     local command="$1"
     printf 'docker exec -it %q bash -lc %q' "${CONTAINER}" "${command}"
@@ -114,11 +128,7 @@ EOF
 
 roscore_cmd=$(cat <<EOF
 ${ROS_ENV}
-if rostopic list >/dev/null 2>&1; then
-  echo "ROS master already reachable at \$ROS_MASTER_URI; reusing it."
-  exec bash
-fi
-roscore
+exec roscore
 EOF
 )
 
@@ -138,6 +148,7 @@ rosrun piper piper_ctrl_single_node.py \
   _can_port:=can0 \
   _auto_enable:=false \
   _gripper_val_mutiple:=1 \
+  _girpper_exist:=true \
   _gripper_exist:=true \
   joint_ctrl_single:=/piper_joint_commands
 EOF
@@ -160,6 +171,59 @@ stop_stack_processes() {
         pkill -f "[r]osmaster" || true
         pkill -f "[r]osout" || true
     ' >/dev/null 2>&1 || true
+}
+
+restart_piper_driver_window() {
+    local process_count
+    process_count="$(docker exec "${CONTAINER}" bash -lc "pgrep -fc '[p]iper_ctrl_single_node.py' || true")"
+
+    if tmux_window_exists "piper_driver"; then
+        tmux kill-window -t "${SESSION}:piper_driver" 2>/dev/null || true
+    fi
+
+    if [[ "${process_count}" != "0" ]]; then
+        docker exec "${CONTAINER}" bash -lc "pkill -f '[p]iper_ctrl_single_node.py' || true" >/dev/null 2>&1 || true
+        sleep 1
+        docker exec "${CONTAINER}" bash -lc "pgrep -f '[p]iper_ctrl_single_node.py' >/dev/null 2>&1 && pkill -9 -f '[p]iper_ctrl_single_node.py' || true" >/dev/null 2>&1 || true
+    fi
+
+    tmux new-window -t "${SESSION}" -n "piper_driver" "$(docker_shell "${piper_driver_cmd}")"
+}
+
+repair_existing_session() {
+    local process_count=0
+    local node_count=0
+    local tmux_window_state="missing"
+    local moveit_wrapper_window_state="missing"
+    local moveit_ctrl_process_count=0
+    local moveit_ctrl_node_alive="false"
+    process_count="$(docker exec "${CONTAINER}" bash -lc "pgrep -fc '[p]iper_ctrl_single_node.py' || true")"
+    node_count="$(container_ros "rosnode list 2>/dev/null | grep -Ec '^/piper_ctrl_single_node(_|$)' || true" 2>/dev/null || echo 0)"
+    if tmux_window_exists "piper_driver"; then
+        tmux_window_state="present"
+    fi
+    if tmux_window_exists "moveit_wrapper"; then
+        moveit_wrapper_window_state="present"
+    fi
+    moveit_ctrl_process_count="$(docker exec "${CONTAINER}" bash -lc "pgrep -fc '[j]oint_moveit_ctrl_server.py' || true")"
+    if container_ros "rosnode ping -c 1 /joint_moveit_ctrl_server >/dev/null 2>&1"; then
+        moveit_ctrl_node_alive="true"
+    fi
+
+    if [[ "${process_count}" != "1" || "${node_count}" != "1" || "${tmux_window_state}" != "present" ]]; then
+        echo "Repairing stale PiPER driver state: tmux_window=${tmux_window_state} process_count=${process_count} node_count=${node_count}"
+        restart_piper_driver_window
+    fi
+
+    if [[ "${moveit_wrapper_window_state}" != "present" || "${moveit_ctrl_process_count}" != "1" || "${moveit_ctrl_node_alive}" != "true" ]]; then
+        echo "Repairing stale MoveIt wrapper state: tmux_window=${moveit_wrapper_window_state} process_count=${moveit_ctrl_process_count} node_alive=${moveit_ctrl_node_alive}"
+        if tmux_window_exists "moveit_wrapper"; then
+            tmux kill-window -t "${SESSION}:moveit_wrapper" 2>/dev/null || true
+        fi
+        docker exec "${CONTAINER}" bash -lc "pkill -f '[j]oint_moveit_ctrl_server.py' || true" >/dev/null 2>&1 || true
+        sleep 1
+        tmux new-window -t "${SESSION}" -n "moveit_wrapper" "$(docker_shell "${moveit_wrapper_cmd}")"
+    fi
 }
 
 joint_state_relay_cmd=$(cat <<EOF
@@ -254,10 +318,15 @@ EOF
 moveit_wrapper_cmd=$(cat <<EOF
 ${ROS_ENV}
 until rosservice list 2>/dev/null | grep -qx /get_planning_scene; do sleep 1; done
+until timeout 5 rostopic echo -n 1 /move_group/status >/dev/null 2>&1; do sleep 1; done
 while true; do
   if rosnode list 2>/dev/null | grep -qx /joint_moveit_ctrl_server; then
-    sleep 1
-    continue
+    if rosnode ping -c 1 /joint_moveit_ctrl_server >/dev/null 2>&1; then
+      sleep 1
+      continue
+    fi
+    echo "Detected stale /joint_moveit_ctrl_server registration; cleaning up."
+    yes | rosnode cleanup >/dev/null 2>&1 || true
   fi
   rosrun moveit_ctrl joint_moveit_ctrl_server.py || true
   sleep 2
@@ -393,7 +462,8 @@ main() {
             echo "Restarting tmux session ${SESSION}..."
             tmux kill-session -t "${SESSION}"
         else
-            echo "tmux session ${SESSION} already exists; not starting duplicate services."
+            repair_existing_session
+            echo "tmux session ${SESSION} already exists; reusing it."
             if [[ "${attach}" == true ]]; then
                 exec tmux attach-session -t "${SESSION}"
             fi
