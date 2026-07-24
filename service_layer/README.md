@@ -3,6 +3,8 @@
 This directory contains the core service modules used by ABot-Claw.  
 Use this page as an index of available services, their purpose, and their source repositories.
 
+Durable operating guidance for this repository lives in ../AGENTS.md and ./AGENTS.md. Keep detailed service results in the service docs, and keep persistent agent/service rules in those AGENTS files.
+
 ## Service List
 
 
