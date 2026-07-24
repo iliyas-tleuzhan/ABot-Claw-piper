@@ -7,9 +7,11 @@ import actionlib
 import numpy as np
 import rospy
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryFeedback, FollowJointTrajectoryResult
+from piper_msgs.srv import Enable
 from piper_msgs.srv import Gripper
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
+from typing import Tuple
 
 
 ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
@@ -31,6 +33,8 @@ class PiperTrajectoryBridge:
         self.feedback_timeout_s = rospy.get_param("~feedback_timeout_s", 45.0)
         self.final_settle_timeout_s = rospy.get_param("~final_settle_timeout_s", 0.5)
         self.final_settle_max_commands = int(rospy.get_param("~final_settle_max_commands", 25))
+        self.enable_service_name = rospy.get_param("~enable_service", "/enable_srv")
+        self.enable_service_wait_timeout_s = rospy.get_param("~enable_service_wait_timeout_s", 5.0)
         self.gripper_service_name = rospy.get_param("~gripper_service", "/gripper_srv")
         self.gripper_effort = rospy.get_param("~gripper_effort", 1.0)
         self.gripper_feedback_tolerance_m = rospy.get_param("~gripper_feedback_tolerance_m", 0.003)
@@ -39,6 +43,7 @@ class PiperTrajectoryBridge:
         self.gripper_require_feedback = rospy.get_param("~gripper_require_feedback", False)
         self.latest_positions = {}
         self.command_publisher = rospy.Publisher(self.command_topic, JointState, queue_size=1)
+        self.enable_service = rospy.ServiceProxy(self.enable_service_name, Enable)
         self.gripper_service = rospy.ServiceProxy(self.gripper_service_name, Gripper)
         self.feedback_subscriber = rospy.Subscriber(
             self.feedback_topic, JointState, self.on_feedback, queue_size=1
@@ -76,6 +81,21 @@ class PiperTrajectoryBridge:
 
     def on_feedback(self, state: JointState) -> None:
         self.latest_positions = dict(zip(state.name, state.position))
+
+    def ensure_arm_enabled(self) -> Tuple[bool, str]:
+        try:
+            rospy.wait_for_service(self.enable_service_name, self.enable_service_wait_timeout_s)
+        except rospy.ROSException as exc:
+            return False, f"Timed out waiting for {self.enable_service_name}: {exc}"
+        try:
+            response = self.enable_service(enable_request=True)
+        except rospy.ServiceException as exc:
+            return False, f"Enable service call failed: {exc}"
+
+        enabled = bool(getattr(response, "enable_response", False))
+        if not enabled:
+            return False, f"{self.enable_service_name} did not confirm the arm is enabled"
+        return True, "PiPER arm enable preflight succeeded"
 
     @staticmethod
     def moveit_finger_joint_to_total_opening_width(moveit_finger_joint_m: float) -> float:
@@ -237,6 +257,15 @@ class PiperTrajectoryBridge:
             self.reject(result, "Each trajectory point must contain six arm joint positions")
             return
 
+        enabled, enable_message = self.ensure_arm_enabled()
+        if not enabled:
+            result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+            result.error_string = enable_message
+            rospy.logwarn("Rejecting Piper arm trajectory before streaming commands: %s", enable_message)
+            self.server.set_aborted(result, enable_message)
+            return
+        rospy.loginfo("%s", enable_message)
+
         command_points = self.build_command_points(trajectory.points)
         rospy.loginfo(
             "Executing Piper arm trajectory: original_points=%d command_points=%d "
@@ -314,6 +343,15 @@ class PiperTrajectoryBridge:
             result.error_string = "Each gripper trajectory point must contain one joint7 position"
             self.gripper_server.set_aborted(result, result.error_string)
             return
+
+        enabled, enable_message = self.ensure_arm_enabled()
+        if not enabled:
+            result.error_code = FollowJointTrajectoryResult.INVALID_GOAL
+            result.error_string = enable_message
+            rospy.logwarn("Rejecting Piper gripper trajectory before streaming commands: %s", enable_message)
+            self.gripper_server.set_aborted(result, enable_message)
+            return
+        rospy.loginfo("%s", enable_message)
 
         try:
             rospy.wait_for_service(self.gripper_service_name, self.gripper_service_wait_timeout_s)

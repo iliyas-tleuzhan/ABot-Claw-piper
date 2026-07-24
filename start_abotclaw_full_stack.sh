@@ -119,6 +119,16 @@ tmux_replace_window() {
     tmux new-window -t "${SESSION}" -n "${name}" "bash -lc $(printf '%q' "${command}")"
 }
 
+prepare_log_file() {
+    local path="${LOG_DIR}/$1"
+    mkdir -p "${LOG_DIR}"
+    if [[ -e "${path}" && ! -w "${path}" ]]; then
+        log "Removing unwritable managed log file ${path} so it can be recreated."
+        rm -f "${path}"
+    fi
+    touch "${path}"
+}
+
 ensure_full_tmux() {
     stage="tmux session setup"
     mkdir -p "${LOG_DIR}"
@@ -486,6 +496,32 @@ lower_stack_healthy() {
         && tf_ready base_link gripper_base
 }
 
+piper_enable_service_ready() {
+    container_ros "rosservice list 2>/dev/null | grep -Fxq '/enable_srv'"
+}
+
+enable_piper_driver() {
+    local attempt output
+    if [[ "${MODE}" == "status" ]]; then
+        return 0
+    fi
+    if ! piper_enable_service_ready; then
+        log "WARNING: /enable_srv is not available yet; skipping PiPER enable preflight."
+        return 1
+    fi
+    for attempt in 1 2 3 4 5; do
+        output="$(container_ros "rosservice call /enable_srv 'enable_request: true' 2>&1" || true)"
+        if grep -Fq "enable_response: True" <<<"${output}"; then
+            log "PiPER enable preflight succeeded on attempt ${attempt}."
+            return 0
+        fi
+        log "WARNING: PiPER enable preflight attempt ${attempt} failed: ${output}"
+        sleep 1
+    done
+    log "WARNING: PiPER enable preflight did not succeed after retries."
+    return 1
+}
+
 start_lower_stack() {
     stage="lower Piper stack"
     if [[ "${MODE}" == "status" ]]; then
@@ -500,6 +536,8 @@ start_lower_stack() {
     wait_until "ROS master" 60 1 ros_ready || true
     wait_until "/joint_states_single" 60 1 topic_ready /joint_states_single || true
     wait_until "/move_group" 90 1 node_ready /move_group || true
+    wait_until "/enable_srv" 30 1 piper_enable_service_ready || true
+    enable_piper_driver || true
     wait_until "lower Piper stack readiness" 90 1 lower_stack_healthy || true
 }
 
@@ -932,6 +970,7 @@ start_handeye() {
         return 0
     fi
     local cmd
+    prepare_log_file "handeye-publisher.log"
     cmd="mkdir -p $(printf '%q' "${LOG_DIR}"); exec docker exec -i ${CONTAINER} bash -lc 'source /opt/ros/noetic/setup.bash; source ${ROS_WS}/devel/setup.bash; source ${EASY_HANDEYE_WS}/devel/setup.bash; export ROS_MASTER_URI=http://localhost:11311; export ROS_HOSTNAME=localhost; roslaunch easy_handeye publish.launch eye_on_hand:=false namespace_prefix:=piper_d555' 2>&1 | tee -a $(printf '%q' "${LOG_DIR}/handeye-publisher.log")"
     tmux_replace_window "handeye-publisher" "${cmd}"
     wait_until "saved camera TF base_link -> table_camera_color_optical_frame" 20 1 saved_camera_tf_ready || true
