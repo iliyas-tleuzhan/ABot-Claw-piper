@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import actionlib
+import numpy as np
 import rospy
 from control_msgs.msg import FollowJointTrajectoryAction, FollowJointTrajectoryFeedback, FollowJointTrajectoryResult
 from piper_msgs.srv import Gripper
 from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectoryPoint
 
 
 ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
@@ -23,10 +25,12 @@ class PiperTrajectoryBridge:
         self.feedback_topic = rospy.get_param("~feedback_topic", "/joint_states_single")
         self.arm_require_feedback = rospy.get_param("~arm_require_feedback", True)
         self.hardware_speed_percent = rospy.get_param("~hardware_speed_percent", 100.0)
-        self.trajectory_command_rate_hz = rospy.get_param("~trajectory_command_rate_hz", 20.0)
+        self.trajectory_command_rate_hz = rospy.get_param("~trajectory_command_rate_hz", 50.0)
         self.redundant_joint_delta_rad = rospy.get_param("~redundant_joint_delta_rad", 0.001)
         self.feedback_tolerance_rad = rospy.get_param("~feedback_tolerance_rad", 0.02)
         self.feedback_timeout_s = rospy.get_param("~feedback_timeout_s", 45.0)
+        self.final_settle_timeout_s = rospy.get_param("~final_settle_timeout_s", 0.5)
+        self.final_settle_max_commands = int(rospy.get_param("~final_settle_max_commands", 25))
         self.gripper_service_name = rospy.get_param("~gripper_service", "/gripper_srv")
         self.gripper_effort = rospy.get_param("~gripper_effort", 1.0)
         self.gripper_feedback_tolerance_m = rospy.get_param("~gripper_feedback_tolerance_m", 0.003)
@@ -127,12 +131,11 @@ class PiperTrajectoryBridge:
         return False
 
     def hold_final_target_until_reached(self, target_positions) -> bool:
-        """Keep the accepted final target active while waiting for hardware feedback."""
-        deadline = rospy.Time.now() + rospy.Duration(self.feedback_timeout_s)
+        """Keep the accepted final target active for a short bounded settling window."""
+        deadline = rospy.Time.now() + rospy.Duration(min(self.feedback_timeout_s, self.final_settle_timeout_s))
         rate_hz = max(1.0, float(self.trajectory_command_rate_hz))
         rate = rospy.Rate(rate_hz)
         command_count = 0
-        last_log_time = rospy.Time.now()
         final_command = self.make_arm_command(target_positions)
 
         while not rospy.is_shutdown() and rospy.Time.now() < deadline:
@@ -151,23 +154,11 @@ class PiperTrajectoryBridge:
                 )
                 return True
 
+            if command_count >= self.final_settle_max_commands:
+                break
             final_command.header.stamp = rospy.Time.now()
             self.command_publisher.publish(final_command)
             command_count += 1
-
-            now = rospy.Time.now()
-            if (now - last_log_time).to_sec() >= 5.0:
-                last_log_time = now
-                rospy.loginfo(
-                    "Holding Piper final target: commands=%d target=%s feedback=%s",
-                    command_count,
-                    [round(float(value), 6) for value in target_positions],
-                    [
-                        None if self.latest_positions.get(name) is None
-                        else round(float(self.latest_positions.get(name)), 6)
-                        for name in ARM_JOINTS
-                    ],
-                )
             rate.sleep()
 
         return False
@@ -197,36 +188,41 @@ class PiperTrajectoryBridge:
     def effective_hardware_speed_percent(self) -> float:
         return max(0.0, min(100.0, float(self.hardware_speed_percent)))
 
-    def select_command_points(self, points):
-        """Decimate MoveIt's dense timed path before handing it to Piper hardware.
-
-        MoveIt remains responsible for planning, collision checking, timing, and
-        the final target. The Piper driver accepts position targets plus one
-        global hardware speed value, so sending hundreds of near-identical
-        points makes the hardware repeatedly retarget instead of following one
-        smooth timed command stream.
-        """
-        if len(points) <= 2:
+    def build_command_points(self, points):
+        """Resample MoveIt's timed path into a smooth monotonic command stream."""
+        if len(points) <= 1:
             return list(points)
 
-        min_interval_s = 1.0 / max(1.0, float(self.trajectory_command_rate_hz))
+        sample_interval_s = 1.0 / max(1.0, float(self.trajectory_command_rate_hz))
+        source_times = np.asarray([float(point.time_from_start.to_sec()) for point in points], dtype=float)
+        source_positions = np.asarray([[float(value) for value in point.positions] for point in points], dtype=float)
+        total_duration_s = float(source_times[-1])
+        sample_times = list(np.arange(0.0, total_duration_s, sample_interval_s))
+        if not sample_times or sample_times[0] != 0.0:
+            sample_times.insert(0, 0.0)
+        if sample_times[-1] < total_duration_s:
+            sample_times.append(total_duration_s)
+
+        command_points = []
+        last_positions = None
         min_delta = float(self.redundant_joint_delta_rad)
-        selected = [points[0]]
-        last_time = points[0].time_from_start.to_sec()
-        last_positions = [float(v) for v in points[0].positions]
-
-        for point in points[1:-1]:
-            current_time = point.time_from_start.to_sec()
-            positions = [float(v) for v in point.positions]
-            max_delta = max(abs(a - b) for a, b in zip(positions, last_positions))
-            if current_time - last_time >= min_interval_s and max_delta >= min_delta:
-                selected.append(point)
-                last_time = current_time
-                last_positions = positions
-
-        if selected[-1] is not points[-1]:
-            selected.append(points[-1])
-        return selected
+        for sample_time in sample_times:
+            positions = np.asarray(
+                [
+                    np.interp(sample_time, source_times, source_positions[:, joint_index])
+                    for joint_index in range(source_positions.shape[1])
+                ],
+                dtype=float,
+            )
+            if last_positions is not None and sample_time != total_duration_s:
+                if float(np.max(np.abs(positions - last_positions))) < min_delta:
+                    continue
+            point = JointTrajectoryPoint()
+            point.positions = positions.tolist()
+            point.time_from_start = rospy.Duration.from_sec(float(sample_time))
+            command_points.append(point)
+            last_positions = positions
+        return command_points
 
     def execute_arm(self, goal) -> None:
         trajectory = goal.trajectory
@@ -241,7 +237,7 @@ class PiperTrajectoryBridge:
             self.reject(result, "Each trajectory point must contain six arm joint positions")
             return
 
-        command_points = self.select_command_points(trajectory.points)
+        command_points = self.build_command_points(trajectory.points)
         rospy.loginfo(
             "Executing Piper arm trajectory: original_points=%d command_points=%d "
             "hardware_speed_percent=%.1f",
@@ -278,7 +274,13 @@ class PiperTrajectoryBridge:
             ],
         )
 
-        if self.arm_require_feedback and not self.hold_final_target_until_reached(trajectory.points[-1].positions):
+        if self.arm_require_feedback and not self.wait_for_final_position(trajectory.points[-1].positions):
+            if not self.hold_final_target_until_reached(trajectory.points[-1].positions):
+                result.error_code = FollowJointTrajectoryResult.GOAL_TOLERANCE_VIOLATED
+                result.error_string = "Timed out waiting for Piper joint feedback at final trajectory point"
+                self.server.set_aborted(result, result.error_string)
+                return
+        if self.arm_require_feedback and not self.final_position_reached(trajectory.points[-1].positions):
             result.error_code = FollowJointTrajectoryResult.GOAL_TOLERANCE_VIOLATED
             result.error_string = "Timed out waiting for Piper joint feedback at final trajectory point"
             self.server.set_aborted(result, result.error_string)
