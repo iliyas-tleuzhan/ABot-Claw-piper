@@ -33,6 +33,16 @@ class PiperDriverStartupTests(unittest.TestCase):
         self.assertIn("def build_command_points(self, points):", bridge)
         self.assertIn("np.interp(", bridge)
 
+    def test_moveit_stack_is_legacy_opt_in_not_default(self) -> None:
+        lower = (REPO_ROOT / "start_abotclaw_all.sh").read_text()
+        full = (REPO_ROOT / "start_abotclaw_full_stack.sh").read_text()
+        self.assertIn('START_LEGACY_MOVEIT="${ABOT_START_LEGACY_MOVEIT:-false}"', lower)
+        self.assertIn("--legacy-moveit", lower)
+        self.assertIn('if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then', lower)
+        self.assertIn('START_LEGACY_MOVEIT="${ABOT_START_LEGACY_MOVEIT:-false}"', full)
+        self.assertIn("--legacy-moveit", full)
+        self.assertIn("Default manipulation path: OpenClaw semantic phases -> OpenPI", lower)
+
 
 if __name__ == "__main__":
     unittest.main()

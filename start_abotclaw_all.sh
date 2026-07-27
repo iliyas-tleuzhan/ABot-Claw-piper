@@ -11,6 +11,7 @@ CONTAINER_REPO="/root/ABot-Claw"
 STACK_DIR="${CONTAINER_REPO}/robot_layer/arm_piper/agent_server"
 ROS_WS="${STACK_DIR}/robot_driver_ros"
 USE_FAKE_DEPTH=false
+START_LEGACY_MOVEIT="${ABOT_START_LEGACY_MOVEIT:-false}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -27,6 +28,7 @@ Usage: ./start_abotclaw_all.sh [--restart] [--use-fake-depth] [--no-attach|--det
   (no option)  Start the infrastructure if needed, then attach to tmux.
   --restart     Kill the existing abotclaw tmux session and start it fresh.
   --use-fake-depth  Use the raw ROS RealSense publisher plus fake aligned-depth bridge.
+  --legacy-moveit  Also start the archived MoveIt/FollowJointTrajectory bridge.
   --no-attach, --detach  Start/reuse the tmux session and return without attaching.
   --status      Show Docker, tmux, and ROS quick status without starting anything.
   --stop        Stop only the abotclaw tmux session; Docker continues running.
@@ -215,7 +217,7 @@ repair_existing_session() {
         restart_piper_driver_window
     fi
 
-    if [[ "${moveit_wrapper_window_state}" != "present" || "${moveit_ctrl_process_count}" != "1" || "${moveit_ctrl_node_alive}" != "true" ]]; then
+    if [[ "${START_LEGACY_MOVEIT}" == "true" && ( "${moveit_wrapper_window_state}" != "present" || "${moveit_ctrl_process_count}" != "1" || "${moveit_ctrl_node_alive}" != "true" ) ]]; then
         echo "Repairing stale MoveIt wrapper state: tmux_window=${moveit_wrapper_window_state} process_count=${moveit_ctrl_process_count} node_alive=${moveit_ctrl_node_alive}"
         if tmux_window_exists "moveit_wrapper"; then
             tmux kill-window -t "${SESSION}:moveit_wrapper" 2>/dev/null || true
@@ -375,14 +377,15 @@ check_topic_publishers /table_camera/color/camera_info 0
 timeout 8 rostopic hz /table_camera/color/image_raw
 timeout 8 rostopic hz /table_camera/aligned_depth_to_color/image_raw
 timeout 8 rostopic echo -n 1 /table_camera/color/camera_info
-rosservice list | grep joint_moveit_ctrl || true
+if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
+  rosservice list | grep joint_moveit_ctrl || true
+fi
 cat <<'NEXT_STEPS'
 
 ABot-Claw infrastructure started.
 Next manual commands:
 cd /root/ABot-Claw/robot_layer/arm_piper/agent_server
-python3 calibrate_camera_to_base_points.py ...
-python3 today_red_to_purple_pick_place.py --calibration camera_to_base.yaml
+Use piper-pipeline-testbed/piper-on-bunker/scripts/run_openpi_piper_task.py for shadow OpenPI tests.
 NEXT_STEPS
 echo "WARNING: Motion scripts must be run manually after reviewing these health checks."
 exec bash
@@ -405,6 +408,9 @@ main() {
             --use-fake-depth)
                 USE_FAKE_DEPTH=true
                 ;;
+            --legacy-moveit)
+                START_LEGACY_MOVEIT=true
+                ;;
             --no-attach|--detach)
                 attach=false
                 ;;
@@ -423,8 +429,8 @@ main() {
         shift
     done
 
-    if [[ "${action}" != "start" && ( "${restart}" == true || "${USE_FAKE_DEPTH}" == true ) ]]; then
-        echo "ERROR: --restart and --use-fake-depth can only be used when starting." >&2
+    if [[ "${action}" != "start" && ( "${restart}" == true || "${USE_FAKE_DEPTH}" == true || "${START_LEGACY_MOVEIT}" == true ) ]]; then
+        echo "ERROR: --restart, --use-fake-depth, and --legacy-moveit can only be used when starting." >&2
         exit 2
     fi
     if [[ "${action}" != "start" && "${attach}" == false ]]; then
@@ -477,7 +483,12 @@ main() {
     fi
 
     echo "WARNING: This starts infrastructure only. It does not move the robot."
-    echo "MoveIt will use the Piper FollowJointTrajectory bridge for hardware trajectory commands."
+    echo "Default manipulation path: OpenClaw semantic phases -> OpenPI pi0.5 direct joint chunks -> /piper_joint_commands."
+    if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
+        echo "WARNING: Starting legacy MoveIt/LAP-compatible services by explicit request."
+    else
+        echo "Legacy MoveIt trajectory services are not started. Use --legacy-moveit only for archived experiments."
+    fi
     if [[ "${USE_FAKE_DEPTH}" == true ]]; then
         echo "WARNING: Using fake aligned depth fallback, not RealSense hardware alignment."
     else
@@ -493,9 +504,11 @@ main() {
     else
         tmux new-window -t "${SESSION}" -n "realsense" "$(docker_shell "${real_aligned_realsense_cmd}")"
     fi
-    tmux new-window -t "${SESSION}" -n "trajectory_bridge" "$(docker_shell "${trajectory_bridge_cmd}")"
-    tmux new-window -t "${SESSION}" -n "moveit_services" "$(docker_shell "${moveit_cmd}")"
-    tmux new-window -t "${SESSION}" -n "moveit_wrapper" "$(docker_shell "${moveit_wrapper_cmd}")"
+    if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
+        tmux new-window -t "${SESSION}" -n "trajectory_bridge" "$(docker_shell "${trajectory_bridge_cmd}")"
+        tmux new-window -t "${SESSION}" -n "moveit_services" "$(docker_shell "${moveit_cmd}")"
+        tmux new-window -t "${SESSION}" -n "moveit_wrapper" "$(docker_shell "${moveit_wrapper_cmd}")"
+    fi
     tmux new-window -t "${SESSION}" -n "health_checks" "$(docker_shell "${health_checks_cmd}")"
     tmux select-window -t "${SESSION}:roscore"
 

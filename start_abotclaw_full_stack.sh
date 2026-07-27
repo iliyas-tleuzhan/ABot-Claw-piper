@@ -31,6 +31,8 @@ REMOTE_REPO="/workspace/ABot-Claw-piper"
 REMOTE_YOLO_CONTAINER="yolo-5090-torch"
 REMOTE_YOLO_URL="http://${REMOTE_HOST}:8013"
 REMOTE_GRASP_URL="http://${REMOTE_HOST}:8015"
+REMOTE_OPENPI_URL="${ABOT_OPENPI_URL:-http://${REMOTE_HOST}:8017}"
+START_LEGACY_MOVEIT="${ABOT_START_LEGACY_MOVEIT:-false}"
 LOCAL_YOLO_URL="${ABOT_YOLO_URL:-http://127.0.0.1:8013}"
 LOCAL_GRASP_URL="${ABOT_GRASP_URL:-http://127.0.0.1:8015}"
 AGENT_URL="http://localhost:8888"
@@ -46,12 +48,13 @@ trap 'echo "ERROR: failed during stage: ${stage}" >&2' ERR
 
 usage() {
     cat <<'EOF'
-Usage: ./start_abotclaw_full_stack.sh [--restart] [--status] [--stop]
+Usage: ./start_abotclaw_full_stack.sh [--restart] [--status] [--stop] [--legacy-moveit]
 
   (no args)   Start/reuse the full ABot-Claw Piper stack.
   --restart   Fully stop local/remote ABot-Claw processes, then start fresh.
   --status    Inspect and print status only. Does not start services or edit routes.
   --stop      Stop ABot-Claw tmux sessions and related local/remote service processes.
+  --legacy-moveit  Start archived MoveIt manipulation services and MoveIt RViz.
 EOF
 }
 
@@ -470,19 +473,12 @@ PY"
 }
 
 lower_stack_healthy() {
-    local mgr
-    mgr="$(container_ros "rosparam get /move_group/moveit_controller_manager 2>/dev/null || true" | tr -d '\r')"
     ros_ready \
         && topic_ready /joint_states \
         && topic_ready /joint_states_single \
         && topic_ready /end_pose \
         && node_ready /robot_state_publisher \
         && param_ready /robot_description \
-        && node_ready /move_group \
-        && node_ready /joint_moveit_ctrl_server \
-        && container_ros "rosservice info /joint_moveit_ctrl_arm >/dev/null 2>&1" \
-        && container_ros "rosservice info /joint_moveit_ctrl_piper >/dev/null 2>&1" \
-        && [[ "${mgr}" == "moveit_simple_controller_manager/MoveItSimpleControllerManager" ]] \
         && topic_ready /table_camera/color/image_raw \
         && topic_ready /table_camera/aligned_depth_to_color/image_raw \
         && topic_ready /table_camera/color/camera_info \
@@ -499,10 +495,18 @@ start_lower_stack() {
         return 0
     fi
     log "Starting lower Piper stack via start_abotclaw_all.sh --lower-only --restart --no-attach."
-    (cd "${REPO_DIR}" && ./start_abotclaw_all.sh --lower-only --restart --no-attach)
+    local lower_args=(--lower-only --restart --no-attach)
+    if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
+        lower_args+=(--legacy-moveit)
+    fi
+    (cd "${REPO_DIR}" && ./start_abotclaw_all.sh "${lower_args[@]}")
     wait_until "ROS master" 60 1 ros_ready || true
     wait_until "/joint_states_single" 60 1 topic_ready /joint_states_single || true
-    wait_until "/move_group" 90 1 node_ready /move_group || true
+    if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
+        wait_until "/move_group" 90 1 node_ready /move_group || true
+    fi
+    wait_until "/enable_srv" 30 1 piper_enable_service_ready || true
+    enable_piper_driver || true
     wait_until "lower Piper stack readiness" 90 1 lower_stack_healthy || true
 }
 
@@ -951,6 +955,10 @@ start_rviz() {
     if [[ "${MODE}" == "status" ]]; then
         return 0
     fi
+    if [[ "${START_LEGACY_MOVEIT}" != "true" ]]; then
+        set_status "RViz" "not started: legacy MoveIt disabled"
+        return 0
+    fi
     if rviz_ready; then
         log "RViz is already running; reusing it."
         return 0
@@ -978,16 +986,26 @@ update_local_status() {
     topic_ready /table_camera/aligned_depth_to_color/image_raw && set_status "RealSense aligned depth" "ok" || set_status "RealSense aligned depth" "not ready"
     topic_ready /table_camera/color/camera_info && set_status "camera_info" "ok" || set_status "camera_info" "not ready"
     image_proc_ready && set_status "image_proc rectification" "ok: ${RECTIFIED_IMAGE_TOPIC}" || set_status "image_proc rectification" "not ready"
-    node_ready /move_group && set_status "move_group" "ok" || set_status "move_group" "not ready"
-    local mgr
-    mgr="$(container_ros "rosparam get /move_group/moveit_controller_manager 2>/dev/null || true" | tr -d '\r')"
-    set_status "MoveIt controller manager" "${mgr:-not ready}"
+    if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
+        node_ready /move_group && set_status "move_group" "legacy ok" || set_status "move_group" "legacy not ready"
+        local mgr
+        mgr="$(container_ros "rosparam get /move_group/moveit_controller_manager 2>/dev/null || true" | tr -d '\r')"
+        set_status "MoveIt controller manager" "${mgr:-legacy not ready}"
+    else
+        set_status "move_group" "not expected: legacy disabled"
+        set_status "MoveIt controller manager" "not expected: legacy disabled"
+    fi
     agent_healthy && set_status "Agent Server port 8888" "healthy" || set_status "Agent Server port 8888" "not ready"
     validate_agent_state
     if command -v openclaw >/dev/null 2>&1 && openclaw gateway health >/dev/null 2>&1; then
         set_status "OpenClaw gateway" "running"
     else
         : "${STATUS["OpenClaw gateway"]:=not ready}"
+    fi
+    if curl -fsS --max-time 2 "${REMOTE_OPENPI_URL}/healthz" >/dev/null 2>&1; then
+        set_status "OpenPI policy service" "healthy: ${REMOTE_OPENPI_URL}"
+    else
+        set_status "OpenPI policy service" "not ready: ${REMOTE_OPENPI_URL}"
     fi
     openclaw_readonly_smoke && set_status "OpenClaw read-only smoke" "ok" || set_status "OpenClaw read-only smoke" "not ready"
     node_ready /aruco_simple && set_status "ArUco node" "running" || set_status "ArUco node" "not ready"
@@ -1052,6 +1070,7 @@ Local:
   Agent Server port 8888:              ${STATUS["Agent Server port 8888"]:-unknown}
   Agent Server real robot state:       ${STATUS["Agent Server real robot state"]:-unknown}
   OpenClaw gateway:                    ${STATUS["OpenClaw gateway"]:-unknown}
+  OpenPI policy service:               ${STATUS["OpenPI policy service"]:-unknown}
   OpenClaw read-only smoke:            ${STATUS["OpenClaw read-only smoke"]:-unknown}
   ArUco node:                          ${STATUS["ArUco node"]:-unknown}
   ArUco pose topic:                    ${STATUS["ArUco pose topic"]:-unknown}
@@ -1096,6 +1115,7 @@ main() {
             --restart) MODE="restart" ;;
             --status) MODE="status" ;;
             --stop) MODE="stop" ;;
+            --legacy-moveit) START_LEGACY_MOVEIT=true ;;
             --no-attach|--detach) ;;
             -h|--help) usage; exit 0 ;;
             *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
