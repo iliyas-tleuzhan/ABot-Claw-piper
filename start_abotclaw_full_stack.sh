@@ -27,7 +27,7 @@ LOWER_SESSION="abotclaw"
 REMOTE_USER="iliyas"
 REMOTE_HOST="192.168.1.104"
 REMOTE_SSH_ALIAS="master"
-REMOTE_REPO="/workspace/ABot-Claw-piper"
+REMOTE_REPO="${ABOT_REMOTE_REPO:-/workspace/ABot-Claw-piper}"
 REMOTE_YOLO_CONTAINER="yolo-5090-torch"
 REMOTE_YOLO_URL="http://${REMOTE_HOST}:8013"
 REMOTE_GRASP_URL="http://${REMOTE_HOST}:8015"
@@ -323,7 +323,31 @@ stop_remote_perception_processes() {
     fi
     log "Stopping remote YOLO/Grasp processes on ${REMOTE_HOST}."
     ssh_remote "docker exec '${REMOTE_YOLO_CONTAINER}' bash -lc '
-pkill -f \"service_layer/YOLO/main.py|service_layer/GraspAnything/main.py|grasp_service_depth_fallback.py|yolo_stream\" || true
+python3 - <<'\"'\"'PY'\"'\"'
+import os
+import signal
+
+patterns = (
+    \"service_layer/YOLO/main.py\",
+    \"service_layer/GraspAnything/main.py\",
+    \"grasp_service_depth_fallback.py\",
+    \"yolo_stream\",
+)
+own = os.getpid()
+for pid_text in filter(str.isdigit, os.listdir(\"/proc\")):
+    pid = int(pid_text)
+    if pid == own:
+        continue
+    try:
+        cmd = open(f\"/proc/{pid}/cmdline\", \"rb\").read().replace(b\"\\0\", b\" \").decode(\"utf-8\", \"ignore\")
+    except OSError:
+        continue
+    if any(pattern in cmd for pattern in patterns):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+PY
 ' 2>/dev/null || true"
 }
 
@@ -419,6 +443,12 @@ topic_ready() {
     container_ros "rostopic info '${topic}' >/dev/null 2>&1"
 }
 
+topic_message_ready() {
+    local topic="$1"
+    local timeout_s="${2:-5}"
+    container_ros "timeout '${timeout_s}' rostopic echo -n 1 '${topic}' >/dev/null 2>&1"
+}
+
 param_ready() {
     local param="$1"
     container_ros "rosparam get '${param}' >/dev/null 2>&1"
@@ -479,9 +509,6 @@ lower_stack_healthy() {
         && topic_ready /end_pose \
         && node_ready /robot_state_publisher \
         && param_ready /robot_description \
-        && topic_ready /table_camera/color/image_raw \
-        && topic_ready /table_camera/aligned_depth_to_color/image_raw \
-        && topic_ready /table_camera/color/camera_info \
         && tf_ready base_link gripper_base
 }
 
@@ -633,7 +660,32 @@ start_remote_yolo() {
         return 0
     fi
     log "YOLO health not ready; starting official service inside existing ${REMOTE_YOLO_CONTAINER} container."
-    ssh_remote "docker exec '${REMOTE_YOLO_CONTAINER}' bash -lc 'cd ${REMOTE_REPO}/service_layer/YOLO && test -f yolov5l6.pt && if ! pgrep -af \"python.*main.py\" >/dev/null; then nohup env PORT=8013 DEVICE=auto python3 main.py > /tmp/yolo-8013.log 2>&1 & fi'"
+    ssh_remote "docker exec '${REMOTE_YOLO_CONTAINER}' bash -lc '
+cd ${REMOTE_REPO}/service_layer/YOLO
+test -f yolov5l6.pt
+python3 - <<'\"'\"'PY'\"'\"'
+import os
+import signal
+
+cwd_target = os.getcwd()
+own = os.getpid()
+for pid_text in filter(str.isdigit, os.listdir(\"/proc\")):
+    pid = int(pid_text)
+    if pid == own:
+        continue
+    try:
+        cwd = os.path.realpath(os.readlink(f\"/proc/{pid}/cwd\"))
+        args = [part.decode(\"utf-8\", \"ignore\") for part in open(f\"/proc/{pid}/cmdline\", \"rb\").read().split(b\"\\0\") if part]
+    except OSError:
+        continue
+    if cwd == cwd_target and args and args[-1] == \"main.py\":
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+PY
+nohup env PORT=8013 DEVICE=auto python3 main.py > /tmp/yolo-8013.log 2>&1 &
+'"
     wait_until "YOLO health" 90 2 yolo_healthy || true
 }
 
@@ -982,9 +1034,9 @@ update_local_status() {
     topic_ready /end_pose && set_status "/end_pose" "ok" || set_status "/end_pose" "not ready"
     node_ready /robot_state_publisher && set_status "robot_state_publisher" "ok" || set_status "robot_state_publisher" "not ready"
     tf_ready base_link gripper_base && set_status "base_link -> gripper_base TF" "ok" || set_status "base_link -> gripper_base TF" "not ready"
-    topic_ready /table_camera/color/image_raw && set_status "RealSense RGB" "ok" || set_status "RealSense RGB" "not ready"
-    topic_ready /table_camera/aligned_depth_to_color/image_raw && set_status "RealSense aligned depth" "ok" || set_status "RealSense aligned depth" "not ready"
-    topic_ready /table_camera/color/camera_info && set_status "camera_info" "ok" || set_status "camera_info" "not ready"
+    topic_message_ready /table_camera/color/image_raw 4 && set_status "RealSense RGB" "ok" || set_status "RealSense RGB" "not ready"
+    topic_message_ready /table_camera/aligned_depth_to_color/image_raw 4 && set_status "RealSense aligned depth" "ok" || set_status "RealSense aligned depth" "not ready"
+    topic_message_ready /table_camera/color/camera_info 4 && set_status "camera_info" "ok" || set_status "camera_info" "not ready"
     image_proc_ready && set_status "image_proc rectification" "ok: ${RECTIFIED_IMAGE_TOPIC}" || set_status "image_proc rectification" "not ready"
     if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
         node_ready /move_group && set_status "move_group" "legacy ok" || set_status "move_group" "legacy not ready"
@@ -1004,8 +1056,10 @@ update_local_status() {
     fi
     if curl -fsS --max-time 2 "${REMOTE_OPENPI_URL}/healthz" >/dev/null 2>&1; then
         set_status "OpenPI policy service" "healthy: ${REMOTE_OPENPI_URL}"
-    else
+    elif [[ "${ABOT_OPENPI_REQUIRED:-false}" == "true" ]]; then
         set_status "OpenPI policy service" "not ready: ${REMOTE_OPENPI_URL}"
+    else
+        set_status "OpenPI policy service" "not configured: no PiPER checkpoint service on ${REMOTE_OPENPI_URL}"
     fi
     openclaw_readonly_smoke && set_status "OpenClaw read-only smoke" "ok" || set_status "OpenClaw read-only smoke" "not ready"
     node_ready /aruco_simple && set_status "ArUco node" "running" || set_status "ArUco node" "not ready"

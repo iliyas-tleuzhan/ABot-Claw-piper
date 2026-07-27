@@ -61,6 +61,13 @@ docker_shell() {
     printf 'docker exec -it %q bash -lc %q' "${CONTAINER}" "${command}"
 }
 
+docker_shell_keepalive() {
+    local command="$1"
+    local wrapped
+    wrapped="${command}"$'\n''rc=$?; echo; echo "ABot-Claw pane exited with status ${rc}. Keeping shell open for logs."; exec bash'
+    printf 'docker exec -it %q bash -lc %q' "${CONTAINER}" "${wrapped}"
+}
+
 container_exists() {
     docker container inspect "${CONTAINER}" >/dev/null 2>&1
 }
@@ -164,6 +171,7 @@ stop_stack_processes() {
         pkill -f "[p]iper_ctrl_single_node.py" || true
         pkill -f "[p]iper_joint_state_relay.py" || true
         pkill -f "[p]iper_trajectory_bridge.py" || true
+        pkill -f "[r]obot_state_publisher" || true
         pkill -f "[r]ealsense_d555_py_publisher.py" || true
         pkill -f "[r]ealsense2_camera" || true
         pkill -f "[f]ake_aligned_depth_from_raw.py" || true
@@ -236,6 +244,23 @@ if rosnode list 2>/dev/null | grep -q '^/piper_joint_state_relay'; then
 fi
 until timeout 3 rostopic echo -n 1 /joint_states_single >/dev/null 2>&1; do sleep 1; done
 exec python3 ${STACK_DIR}/piper_joint_state_relay.py
+EOF
+)
+
+robot_state_publisher_cmd=$(cat <<EOF
+${ROS_ENV}
+until rostopic list >/dev/null 2>&1; do sleep 1; done
+if rosnode list 2>/dev/null | grep -qx /robot_state_publisher; then
+  echo "robot_state_publisher already exists; reusing it."
+  exec bash
+fi
+description="\$(rospack find piper_description)/urdf/piper_description.urdf"
+if [[ ! -f "\${description}" ]]; then
+  echo "ERROR: PiPER URDF not found: \${description}" >&2
+  exec bash
+fi
+rosparam set --textfile="\${description}" /robot_description
+exec rosrun robot_state_publisher robot_state_publisher __name:=robot_state_publisher
 EOF
 )
 
@@ -498,11 +523,12 @@ main() {
     tmux new-session -d -s "${SESSION}" -n "roscore" "$(docker_shell "${roscore_cmd}")"
     tmux new-window -t "${SESSION}" -n "piper_driver" "$(docker_shell "${piper_driver_cmd}")"
     tmux new-window -t "${SESSION}" -n "joint_state_relay" "$(docker_shell "${joint_state_relay_cmd}")"
+    tmux new-window -t "${SESSION}" -n "robot_state" "$(docker_shell "${robot_state_publisher_cmd}")"
     if [[ "${USE_FAKE_DEPTH}" == true ]]; then
-        tmux new-window -t "${SESSION}" -n "realsense_raw" "$(docker_shell "${raw_realsense_cmd}")"
-        tmux new-window -t "${SESSION}" -n "fake_aligned_depth" "$(docker_shell "${fake_aligned_depth_cmd}")"
+        tmux new-window -t "${SESSION}" -n "realsense_raw" "$(docker_shell_keepalive "${raw_realsense_cmd}")"
+        tmux new-window -t "${SESSION}" -n "fake_aligned_depth" "$(docker_shell_keepalive "${fake_aligned_depth_cmd}")"
     else
-        tmux new-window -t "${SESSION}" -n "realsense" "$(docker_shell "${real_aligned_realsense_cmd}")"
+        tmux new-window -t "${SESSION}" -n "realsense" "$(docker_shell_keepalive "${real_aligned_realsense_cmd}")"
     fi
     if [[ "${START_LEGACY_MOVEIT}" == "true" ]]; then
         tmux new-window -t "${SESSION}" -n "trajectory_bridge" "$(docker_shell "${trajectory_bridge_cmd}")"
