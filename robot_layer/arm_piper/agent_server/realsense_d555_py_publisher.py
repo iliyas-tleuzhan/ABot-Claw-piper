@@ -100,7 +100,11 @@ def main() -> int:
 
     try:
         while not rospy.is_shutdown():
-            frames = pipeline.wait_for_frames(timeout_ms=5000)
+            try:
+                frames = pipeline.wait_for_frames(timeout_ms=5000)
+            except RuntimeError as exc:
+                rospy.logwarn_throttle(10.0, "RealSense frame wait timed out, keeping publisher alive: %s", exc)
+                continue
             aligned = align.process(frames)
             color_frame = aligned.get_color_frame()
             depth_frame = aligned.get_depth_frame()
