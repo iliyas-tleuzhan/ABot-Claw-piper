@@ -512,6 +512,22 @@ lower_stack_healthy() {
         && tf_ready base_link gripper_base
 }
 
+piper_enable_service_ready() {
+    container_ros "rosservice list 2>/dev/null | grep -Fxq /enable_srv"
+}
+
+enable_piper_driver() {
+    if ! piper_enable_service_ready; then
+        return 1
+    fi
+    if container_ros "rosservice call /enable_srv 'enable_request: true' 2>/dev/null | grep -Fq 'enable_response: True'"; then
+        log "PiPER enable preflight succeeded."
+        return 0
+    fi
+    log "WARNING: PiPER enable preflight did not return enable_response: True"
+    return 1
+}
+
 start_lower_stack() {
     stage="lower Piper stack"
     if [[ "${MODE}" == "status" ]]; then
