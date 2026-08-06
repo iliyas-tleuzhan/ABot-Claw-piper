@@ -1,0 +1,86 @@
+schema_version: abotclaw.piper_x.robot_contract.v1
+robot:
+  name: PiPER-X
+  manufacturer: AgileX Robotics
+  arm_type: piper_x
+  effector_type: agx_gripper
+  firmware_argument: v189
+  can_interface: can0
+  can_bitrate: 1000000
+ros2:
+  distro: jazzy
+  setup:
+    - /opt/ros/jazzy/setup.bash
+    - /home/dase-hw101/agx_arm_ws/install/setup.bash
+    - /home/dase-hw101/ros2_ws/install/setup.bash
+  driver_package: agx_arm_ctrl
+  moveit_package: agx_arm_moveit
+  description_package: agx_arm_description
+official_local_sources:
+  agx_arm_ros: /home/dase-hw101/agx_arm_ws/src/agx_arm_ros
+  piper_x_urdf: /home/dase-hw101/agx_arm_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_x/urdf/piper_x_description.urdf
+  piper_x_mesh_dir: /home/dase-hw101/agx_arm_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_x/meshes
+  moveit_joint_limits: /home/dase-hw101/agx_arm_ws/src/agx_arm_ros/src/agx_arm_moveit/config/joint_limits.yaml
+  moveit_controllers: /home/dase-hw101/agx_arm_ws/src/agx_arm_ros/src/agx_arm_moveit/config/moveit_controllers_gripper.yaml
+moveit:
+  planning_group: arm
+  tip_link: tcp_link
+  base_frame: base_link
+  tcp_offset: [0.0, 0.0, 0.1425, 0.0, 0.0, 0.0]
+  feedback_topic: /feedback/joint_states
+  tcp_feedback_topic: /feedback/tcp_pose
+  controller:
+    action: /arm_controller/follow_joint_trajectory
+    joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+  conservative_scaling:
+    velocity: 0.10
+    acceleration: 0.10
+joint_position_limits_rad_from_urdf:
+  joint1: {lower: -2.6179938, upper: 2.6179938}
+  joint2: {lower: 0.0, upper: 3.1415926}
+  joint3: {lower: -2.9670597, upper: 0.0}
+  joint4: {lower: -1.553343, upper: 1.553343}
+  joint5: {lower: -1.553343, upper: 1.553343}
+  joint6: {lower: -2.0943951, upper: 2.0943951}
+moveit_velocity_acceleration_limits_from_config:
+  default_velocity_scaling_factor: 0.10
+  default_acceleration_scaling_factor: 0.10
+  joints:
+    joint1: {max_velocity: 5.0, max_acceleration: 5.0}
+    joint2: {max_velocity: 5.0, max_acceleration: 5.0}
+    joint3: {max_velocity: 5.0, max_acceleration: 5.0}
+    joint4: {max_velocity: 5.0, max_acceleration: 5.0}
+    joint5: {max_velocity: 5.0, max_acceleration: 5.0}
+    joint6: {max_velocity: 5.0, max_acceleration: 5.0}
+camera:
+  model: Intel RealSense D435i
+  mounting: wrist
+  color_image_topic: /camera/camera/color/image_raw
+  camera_info_topic: /camera/camera/color/camera_info
+  point_cloud_topic: /camera/camera/depth/color/points
+  handeye_calibration_file: /home/dase-hw101/handeye/config/piper_x_d435i_eye_in_hand.json
+aruco:
+  dictionary: DICT_ARUCO_ORIGINAL
+  marker_id: 6
+  marker_size_m: 0.10
+  pose_topic: /aruco_single/pose
+local_http_api:
+  agent_base_url: http://127.0.0.1:8893
+  low_level_marker_base_url: http://127.0.0.1:8892
+  agent_health: /health
+  agent_state: /state
+  agent_lease_acquire: /lease/acquire
+  agent_lease_release: /lease/release
+  approach_marker: /tools/approach-marker
+  touch_marker: /tools/touch-marker
+  go_home: /tools/go-home
+  save_home: /tools/save-home
+safety_boundary:
+  default_physical_execution: disabled unless PIPER_X_AGENT_ALLOW_EXECUTION and the low-level marker API execution gate are both enabled
+  contact_confirmation: false
+  completion_type: geometric_surface_approach
+  unsupported_here:
+    - generic pick and place
+    - force-confirmed touch
+    - arbitrary joint commands from OpenClaw
+    - regular Piper piper_sdk / ROS 1 Agent Server commands

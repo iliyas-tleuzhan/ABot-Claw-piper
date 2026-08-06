@@ -1,6 +1,6 @@
 ---
 name: abotclaw-run-robot-task
-description: Execute or plan a real task on Piper, Unitree G1, or Unitree Go2. Use when the user asks the robot fleet to do something in the physical world, including observing, moving, manipulating, inspecting, or multi-robot task execution.
+description: Execute or plan a real task on Piper, PiPER-X, Unitree G1, or Unitree Go2. Use when the user asks the robot fleet to do something in the physical world, including observing, moving, manipulating, inspecting, or multi-robot task execution.
 ---
 
 # AbotClaw Run Robot Task
@@ -19,7 +19,17 @@ Decide whether the request is mainly:
 
 ## Step 2: Choose the robot
 
-Pick Piper, G1, Go2, or a staged combination.
+Pick Piper, PiPER-X, G1, Go2, or a staged combination.
+
+Use PiPER-X when the command is specifically one of:
+
+- approach the marker
+- touch or press ArUco marker 6 / the marked wall location
+- go home
+- save current pose as home
+
+Route those through `abotclaw-piper-x-manipulation` / `piper-touch-marker`, not
+the regular Piper Agent Server.
 
 ## Step 3: Discover real usage first
 

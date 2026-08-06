@@ -1,0 +1,16 @@
+[Unit]
+Description=PiPER-X ABot-Claw Agent Server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dase-hw101/ABot-Claw
+Environment=PIPER_X_AGENT_HOST=127.0.0.1
+Environment=PIPER_X_AGENT_PORT=8893
+Environment=PIPER_X_MARKER_API_URL=http://127.0.0.1:8892
+ExecStart=/usr/bin/bash -lc '/home/dase-hw101/ABot-Claw/robot_layer/arm_piper_x/agent_server/start_piper_x_agent_server.sh'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
