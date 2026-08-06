@@ -48,6 +48,14 @@ class FakeSdk:
         self.calls.append(("save-home", payload))
         return 200, {"success": True, "stage": "complete", "message": "saved"}
 
+    def go_previous(self, payload):
+        self.calls.append(("previous", payload))
+        return 200, {"success": True, "stage": "complete", "message": "previous ok"}
+
+    def save_previous(self):
+        self.calls.append(("save-previous", {}))
+        return 200, {"success": True, "stage": "complete", "message": "previous saved"}
+
     def validate_pose_payload(self, payload):
         return True, "ok"
 
@@ -148,6 +156,35 @@ class PiperXAgentServerTest(unittest.TestCase):
         result = client.post("/tools/save-home", json={"pose_name": "home"})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(sdk.calls[0][0], "save-home")
+
+    def test_plan_only_previous_does_not_require_lease(self):
+        client, sdk, _env, _state = make_client()
+        result = client.post("/tools/go-previous", json={"execute": False})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(sdk.calls[0][0], "previous")
+        self.assertFalse(sdk.calls[0][1]["execute"])
+
+    def test_previous_execute_requires_lease_when_gate_enabled(self):
+        client, _sdk, _env, _state = make_client(execution_allowed=True)
+        with patch.dict(os.environ, {"PIPER_X_AGENT_ALLOW_EXECUTION": "1"}):
+            result = client.post("/tools/go-previous", json={"execute": True})
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(result.json()["detail"]["stage"], "lease")
+
+    def test_previous_execute_with_lease_proxies(self):
+        client, sdk, _env, _state = make_client(execution_allowed=True)
+        with patch.dict(os.environ, {"PIPER_X_AGENT_ALLOW_EXECUTION": "1"}):
+            lease = client.post("/lease/acquire", json={"holder": "test"}).json()["lease_id"]
+            result = client.post("/tools/go-previous", json={"execute": True, "lease_id": lease})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(sdk.calls[0][0], "previous")
+        self.assertNotIn("lease_id", sdk.calls[0][1])
+
+    def test_save_previous_proxies_without_execution_lease(self):
+        client, sdk, _env, _state = make_client()
+        result = client.post("/tools/save-previous", json={})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(sdk.calls[0][0], "save-previous")
 
     def test_open_gripper_plan_only_reports_command_without_publish(self):
         client, _sdk, _env, state = make_client()

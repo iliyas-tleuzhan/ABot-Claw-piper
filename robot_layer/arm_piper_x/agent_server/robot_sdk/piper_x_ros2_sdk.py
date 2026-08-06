@@ -52,6 +52,12 @@ class PiperXAgentSdk:
     def save_home(self, payload: dict) -> tuple[int, dict]:
         return self._request("POST", "/tools/piper/save-home", payload)
 
+    def go_previous(self, payload: dict) -> tuple[int, dict]:
+        return self._request("POST", "/tools/piper/go-previous", payload)
+
+    def save_previous(self) -> tuple[int, dict]:
+        return self._request("POST", "/tools/piper/save-previous", {})
+
     @staticmethod
     def validate_pose_payload(payload: dict) -> tuple[bool, str]:
         position = payload.get("position_m")

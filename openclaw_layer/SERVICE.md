@@ -18,8 +18,8 @@ Update this file first when the service host or port changes.
 | VLAC | Task progress / completion critic | `192.168.1.104` | `8014` | `http://192.168.1.104:8014` | `/health`, `/critic` |
 | GraspAnything | Grasp proposal / grasp detection service | `192.168.1.104` | `8015` | `http://192.168.1.104:8015` | `/health`, `/grasp/detect` |
 | LAP-3B | Action-policy websocket service for PiPER proof-of-concept action generation | `192.168.1.104` | `8016` | `ws://192.168.1.104:8016` | websocket metadata frame, websocket action inference |
-| PiPER-X Agent Server | OpenClaw-facing PiPER-X marker/home/gripper Agent Server with lease, state, and safe tool endpoints | `127.0.0.1` | `8893` | `http://127.0.0.1:8893` | `/health`, `/state`, `/lease/acquire`, `/tools/approach-marker`, `/tools/touch-marker`, `/tools/go-home`, `/tools/save-home`, `/tools/open-gripper`, `/tools/close-gripper` |
-| PiPER-X Marker/Home ROS2 | Local PiPER-X ArUco wall approach, geometric touch, and home-pose bridge | `127.0.0.1` | `8892` | `http://127.0.0.1:8892` | `/health`, `/tools/piper/approach-marker`, `/tools/piper/touch-marker`, `/tools/piper/go-home`, `/tools/piper/save-home` |
+| PiPER-X Agent Server | OpenClaw-facing PiPER-X marker/home/previous/gripper Agent Server with lease, state, and safe tool endpoints | `127.0.0.1` | `8893` | `http://127.0.0.1:8893` | `/health`, `/state`, `/lease/acquire`, `/tools/approach-marker`, `/tools/touch-marker`, `/tools/go-home`, `/tools/save-home`, `/tools/go-previous`, `/tools/save-previous`, `/tools/open-gripper`, `/tools/close-gripper` |
+| PiPER-X Marker/Home ROS2 | Local PiPER-X ArUco wall approach, geometric touch, home-pose, and previous-pose bridge | `127.0.0.1` | `8892` | `http://127.0.0.1:8892` | `/health`, `/tools/piper/approach-marker`, `/tools/piper/touch-marker`, `/tools/piper/go-home`, `/tools/piper/save-home`, `/tools/piper/go-previous`, `/tools/piper/save-previous` |
 
 ## Notes
 

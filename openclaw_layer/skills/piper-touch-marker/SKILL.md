@@ -1,6 +1,6 @@
 ---
 name: piper-touch-marker
-description: Use the PiPER-X ROS 2 Agent Server for requests such as "touch the marker", "touch ArUco marker 6", "move the Piper arm to the marker", "approach the marker", "point at the marker", "press the marked location", "go home", "return the Piper arm home", "open the gripper", or "close the gripper".
+description: Use the PiPER-X ROS 2 Agent Server for requests such as "touch the marker", "touch ArUco marker 6", "move the Piper arm to the marker", "approach the marker", "point at the marker", "press the marked location", "go home", "return the Piper arm home", "go back to the previous pose", "save current pose as previous", "open the gripper", or "close the gripper".
 ---
 
 # PiPER Touch Marker
@@ -70,6 +70,22 @@ curl -sS -X POST http://127.0.0.1:8893/tools/save-home \
   -d '{"pose_name":"home"}'
 ```
 
+Go back to previous pose:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8893/tools/go-previous \
+  -H 'Content-Type: application/json' \
+  -d '{"execute":true,"lease_id":"<LEASE_ID>","duration_s":6.0}'
+```
+
+Save current pose as previous:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8893/tools/save-previous \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
 Open gripper:
 
 ```bash
@@ -91,6 +107,10 @@ curl -sS -X POST http://127.0.0.1:8893/tools/close-gripper \
 This skill targets PiPER-X through the Agent Server on `8893`, not the regular
 Piper Agent Server on `8888`. The Agent Server wraps the lower-level ROS 2
 marker bridge on `8892`.
+
+The previous pose is a saved six-joint snapshot. Physical marker and home
+commands save the current pose as previous before sending motion, and
+`save-previous` can also be called manually from a known safe pose.
 
 Gripper commands use the AgileX ROS 2 command topic `/control/joint_states`,
 message type `sensor_msgs/msg/JointState`, joint name `gripper`, and command

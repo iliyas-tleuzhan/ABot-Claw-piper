@@ -40,6 +40,17 @@ class PiperXMarkerParserTest(unittest.TestCase):
         self.assertEqual(parsed["action"], "save-home")
         self.assertIn("save-home", parsed["command_text"])
 
+    def test_previous_routes_to_previous_endpoint(self):
+        parsed = self.parse("go back to previous pose")
+        self.assertEqual(parsed["action"], "previous")
+        self.assertIn("previous", parsed["command_text"])
+        self.assertIn("--plan-only", parsed["command_text"])
+
+    def test_save_previous_routes_to_non_motion_snapshot(self):
+        parsed = self.parse("save current pose as previous pose")
+        self.assertEqual(parsed["action"], "save-previous")
+        self.assertIn("save-previous", parsed["command_text"])
+
     def test_open_gripper_routes_to_gripper_tool(self):
         parsed = self.parse("open the gripper")
         self.assertEqual(parsed["action"], "open-gripper")

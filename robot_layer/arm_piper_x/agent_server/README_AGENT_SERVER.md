@@ -80,6 +80,43 @@ curl -sS -X POST http://127.0.0.1:8893/tools/touch-marker \
   | python3 -m json.tool
 ```
 
+## Saved Pose Tools
+
+Plan-only home:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  home \
+  --plan-only
+```
+
+Save current pose as previous without moving:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  save-previous
+```
+
+Plan-only return to previous:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  previous \
+  --plan-only
+```
+
+Physical return to previous, after both execution gates are intentionally
+enabled:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  previous \
+  --execute
+```
+
+The previous pose is stored by the low-level bridge as a saved six-joint pose.
+Physical marker and home commands automatically update it before motion.
+
 ## Gripper Tools
 
 The PiPER-X gripper uses the AgileX ROS 2 `agx_arm_ros` control topic:

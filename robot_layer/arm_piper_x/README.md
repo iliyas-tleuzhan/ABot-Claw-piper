@@ -19,6 +19,8 @@ wrapped by a PiPER-X Agent Server:
 - geometric touch marker: `POST /tools/touch-marker`
 - go to saved home pose: `POST /tools/go-home`
 - save current pose as home: `POST /tools/save-home`
+- go to saved previous pose: `POST /tools/go-previous`
+- save current pose as previous: `POST /tools/save-previous`
 - open AgileX gripper: `POST /tools/open-gripper`
 - close AgileX gripper: `POST /tools/close-gripper`
 
@@ -85,6 +87,8 @@ Current PiPER-X skills are:
 - geometric touch of ArUco marker
 - save current pose as home
 - go to saved home pose
+- save current pose as previous
+- go to saved previous pose
 - open gripper
 - close gripper
 
@@ -92,6 +96,10 @@ There is no force sensor in this path. "Touch" means a geometric approach to a
 small clearance from the fitted wall surface, not force-confirmed contact.
 "Close gripper" means command the configured opening width, not confirmed
 object grasp.
+
+The previous pose is a six-joint snapshot. Physical marker and home motions
+save the current pose as previous before sending the new trajectory. The
+operator can also call `save-previous` manually from a known safe pose.
 
 ## Quick Checks
 
@@ -102,6 +110,8 @@ python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py approach 
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py touch --plan-only --retract --return-home-after
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py save-home
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py home --plan-only
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py save-previous
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py previous --plan-only
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py open-gripper --plan-only
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py close-gripper --plan-only
 ```

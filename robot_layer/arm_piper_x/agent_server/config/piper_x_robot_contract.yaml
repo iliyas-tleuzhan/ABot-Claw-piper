@@ -87,12 +87,15 @@ local_http_api:
   touch_marker: /tools/touch-marker
   go_home: /tools/go-home
   save_home: /tools/save-home
+  go_previous: /tools/go-previous
+  save_previous: /tools/save-previous
   open_gripper: /tools/open-gripper
   close_gripper: /tools/close-gripper
 safety_boundary:
   default_physical_execution: disabled unless PIPER_X_AGENT_ALLOW_EXECUTION and the low-level marker API execution gate are both enabled
   contact_confirmation: false
   completion_type: geometric_surface_approach
+  previous_pose_semantics: saved six-joint snapshot captured before physical marker/home motion or by explicit save_previous
   unsupported_here:
     - generic pick and place
     - force-confirmed touch

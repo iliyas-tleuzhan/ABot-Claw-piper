@@ -77,6 +77,7 @@ def command_needs_lease(args: argparse.Namespace) -> bool:
         "approach",
         "touch",
         "home",
+        "previous",
         "open-gripper",
         "close-gripper",
     }
@@ -112,8 +113,14 @@ def main() -> int:
     home.add_argument("--plan-only", action="store_true")
     home.add_argument("--lease-id")
     home.add_argument("--duration", type=float, default=6.0)
+    previous = subparsers.add_parser("previous")
+    previous.add_argument("--execute", action="store_true")
+    previous.add_argument("--plan-only", action="store_true")
+    previous.add_argument("--lease-id")
+    previous.add_argument("--duration", type=float, default=6.0)
     save_home = subparsers.add_parser("save-home")
     save_home.add_argument("--pose-name", default="home")
+    subparsers.add_parser("save-previous")
     for name in ("open-gripper", "close-gripper"):
         gripper = subparsers.add_parser(name)
         gripper.add_argument("--execute", action="store_true")
@@ -157,10 +164,20 @@ def main() -> int:
                     {"execute": args.execute, "lease_id": args.lease_id, "duration_s": args.duration},
                 )
             )
+        if args.command == "previous":
+            return print_result(
+                *request_json(
+                    "POST",
+                    f"{base_url}/tools/go-previous",
+                    {"execute": args.execute, "lease_id": args.lease_id, "duration_s": args.duration},
+                )
+            )
         if args.command == "save-home":
             return print_result(
                 *request_json("POST", f"{base_url}/tools/save-home", {"pose_name": args.pose_name})
             )
+        if args.command == "save-previous":
+            return print_result(*request_json("POST", f"{base_url}/tools/save-previous", {}))
         if args.command in {"open-gripper", "close-gripper"}:
             payload = {
                 "execute": args.execute,

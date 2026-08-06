@@ -34,6 +34,10 @@ class PiperXMarkerTask:
             return base + ["home", "--execute" if execute else "--plan-only"]
         if self.action == "save-home":
             return base + ["save-home"]
+        if self.action == "previous":
+            return base + ["previous", "--execute" if execute else "--plan-only"]
+        if self.action == "save-previous":
+            return base + ["save-previous"]
         if self.action == "open-gripper":
             return base + ["open-gripper", "--execute" if execute else "--plan-only"]
         if self.action == "close-gripper":
@@ -53,7 +57,11 @@ class PiperXMarkerTask:
             "completion_type": (
                 "gripper_width_command"
                 if self.action in {"open-gripper", "close-gripper"}
-                else "geometric_surface_approach"
+                else (
+                    "saved_pose_command"
+                    if self.action in {"home", "previous", "save-home", "save-previous"}
+                    else "geometric_surface_approach"
+                )
             ),
         }
 
@@ -62,10 +70,16 @@ def parse_task(message: str) -> PiperXMarkerTask:
     text = re.sub(r"[^a-z0-9\s-]", " ", message.lower())
     text = re.sub(r"\s+", " ", text).strip()
 
+    if re.search(r"\b(save|remember|update|set)\b.*\b(previous|last)\b.*\b(pose|position)\b", text):
+        return PiperXMarkerTask("save-previous")
     if re.search(r"\b(save|remember|update|set)\b.*\b(home|home pose)\b", text):
         return PiperXMarkerTask("save-home")
     if re.search(r"\b(go|return|move)\b.*\bhome\b", text):
         return PiperXMarkerTask("home")
+    if re.search(r"\b(go|return|move)\b.*\b(previous|last)\b.*\b(pose|position|place|spot)\b", text):
+        return PiperXMarkerTask("previous")
+    if re.search(r"\b(go|return|move)\b.*\bback\b", text):
+        return PiperXMarkerTask("previous")
     if re.search(r"\b(open|release)\b.*\b(gripper|claw|hand)\b", text):
         return PiperXMarkerTask("open-gripper")
     if re.search(r"\b(close|shut)\b.*\b(gripper|claw|hand)\b", text):

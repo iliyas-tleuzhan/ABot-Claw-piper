@@ -1,6 +1,6 @@
 ---
 name: abotclaw-piper-x-manipulation
-description: Route PiPER-X marker, home-pose, and gripper commands through the PiPER-X Agent Server on 127.0.0.1:8893. Use when the user asks the PiPER-X arm to approach/touch ArUco marker 6, press the marked location, go home, save the current pose as home, open the gripper, or close the gripper.
+description: Route PiPER-X marker, home-pose, previous-pose, and gripper commands through the PiPER-X Agent Server on 127.0.0.1:8893. Use when the user asks the PiPER-X arm to approach/touch ArUco marker 6, press the marked location, go home, go back to the previous pose, save the current pose as home or previous, open the gripper, or close the gripper.
 ---
 
 # AbotClaw PiPER-X Manipulation
@@ -58,15 +58,22 @@ For `approach` and `touch`, require:
   The `run_piper_x_agent_task.py` helper acquires and releases this lease
   automatically when `--execute` is used without `--lease-id`.
 
-For `go home`, marker and point-cloud readiness are not required. Require:
+For `go home` and `go previous`, marker and point-cloud readiness are not
+required. Require:
 
 - `ros_ok: true`
 - `home_action_available: true`
 - `joint_state_available: true`
 - `execution_allowed: true` for physical execution
 
-For `save current pose as home`, require fresh joint state. This command does
-not move the robot.
+For `save current pose as home` and `save current pose as previous`, require
+fresh joint state. These commands do not move the robot.
+
+Physical `approach`, `touch`, and `go home` automatically save the current
+six-joint pose as `previous` before sending a trajectory. That gives the
+operator a bounded "go back to previous pose" command after a move. If the
+previous pose file does not exist yet, call `save-previous` from a known safe
+pose first.
 
 For `open gripper` and `close gripper`, marker, point-cloud, and camera
 readiness are not required. Require:
@@ -112,12 +119,29 @@ python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
   --execute
 ```
 
+For "go back to previous pose", "return to the previous pose", or "move back":
+
+```bash
+cd /home/dase-hw101/ABot-Claw &&
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  previous \
+  --execute
+```
+
 For "save current pose as home" or "remember current pose as home":
 
 ```bash
 cd /home/dase-hw101/ABot-Claw &&
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
   save-home
+```
+
+For "save current pose as previous" or "remember current pose as previous":
+
+```bash
+cd /home/dase-hw101/ABot-Claw &&
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  save-previous
 ```
 
 For "open the gripper", "release the gripper", or "open the claw":
@@ -146,6 +170,8 @@ Use `scripts/piper_x_marker_task.py` to classify language into one of:
 - `touch`
 - `home`
 - `save-home`
+- `previous`
+- `save-previous`
 - `open-gripper`
 - `close-gripper`
 

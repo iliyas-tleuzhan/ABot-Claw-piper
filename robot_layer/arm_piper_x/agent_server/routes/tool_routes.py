@@ -173,9 +173,26 @@ def create_router(cfg, sdk, lease_mgr, state_monitor) -> APIRouter:
             raise HTTPException(status_code=422 if status_code < 400 else status_code, detail=normalized)
         return normalized
 
+    @router.post("/go-previous")
+    def go_previous(req: HomeRequest):
+        require_execution_allowed(req.execute, req.lease_id)
+        status_code, result = sdk.go_previous(req.model_dump(exclude={"lease_id"}))
+        normalized = _normalize_marker_api_response(status_code, result)
+        if not normalized.get("success", False):
+            raise HTTPException(status_code=422 if status_code < 400 else status_code, detail=normalized)
+        return normalized
+
     @router.post("/save-home")
     def save_home(req: SaveHomeRequest):
         status_code, result = sdk.save_home(req.model_dump())
+        normalized = _normalize_marker_api_response(status_code, result)
+        if not normalized.get("success", False):
+            raise HTTPException(status_code=422 if status_code < 400 else status_code, detail=normalized)
+        return normalized
+
+    @router.post("/save-previous")
+    def save_previous():
+        status_code, result = sdk.save_previous()
         normalized = _normalize_marker_api_response(status_code, result)
         if not normalized.get("success", False):
             raise HTTPException(status_code=422 if status_code < 400 else status_code, detail=normalized)

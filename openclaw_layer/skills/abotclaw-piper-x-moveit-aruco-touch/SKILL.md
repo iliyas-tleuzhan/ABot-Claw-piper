@@ -1,6 +1,6 @@
 ---
 name: abotclaw-piper-x-moveit-aruco-touch
-description: Legacy alias for the current ROS 2 PiPER-X ArUco marker approach API. Use piper-touch-marker behavior for "touch marker", "approach marker", "go home", and "save current pose as home".
+description: Legacy alias for the current ROS 2 PiPER-X ArUco marker approach API. Use piper-touch-marker behavior for "touch marker", "approach marker", "go home", "save current pose as home", "go previous", and "save current pose as previous".
 ---
 
 # Legacy Alias
@@ -18,6 +18,8 @@ remains on `8892`.
 - `touch the marker` -> `POST http://127.0.0.1:8893/tools/touch-marker`
 - `go home` -> `POST http://127.0.0.1:8893/tools/go-home`
 - `save current pose as home` -> `POST http://127.0.0.1:8893/tools/save-home`
+- `go previous` -> `POST http://127.0.0.1:8893/tools/go-previous`
+- `save current pose as previous` -> `POST http://127.0.0.1:8893/tools/save-previous`
 
 Always call:
 
