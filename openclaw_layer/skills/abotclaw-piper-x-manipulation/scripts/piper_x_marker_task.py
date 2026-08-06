@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse OpenClaw text into the PiPER-X Agent Server marker/home command."""
+"""Parse OpenClaw text into a bounded PiPER-X Agent Server command."""
 
 from __future__ import annotations
 
@@ -34,6 +34,10 @@ class PiperXMarkerTask:
             return base + ["home", "--execute" if execute else "--plan-only"]
         if self.action == "save-home":
             return base + ["save-home"]
+        if self.action == "open-gripper":
+            return base + ["open-gripper", "--execute" if execute else "--plan-only"]
+        if self.action == "close-gripper":
+            return base + ["close-gripper", "--execute" if execute else "--plan-only"]
         return base + ["health"]
 
     def shell_command(self, execute: bool = True, repo_root: str = DEFAULT_REPO_ROOT) -> str:
@@ -46,7 +50,11 @@ class PiperXMarkerTask:
             "selected_robot": self.selected_robot,
             "command_text": self.shell_command(execute=execute, repo_root=repo_root),
             "contact_confirmed": False,
-            "completion_type": "geometric_surface_approach",
+            "completion_type": (
+                "gripper_width_command"
+                if self.action in {"open-gripper", "close-gripper"}
+                else "geometric_surface_approach"
+            ),
         }
 
 
@@ -58,6 +66,10 @@ def parse_task(message: str) -> PiperXMarkerTask:
         return PiperXMarkerTask("save-home")
     if re.search(r"\b(go|return|move)\b.*\bhome\b", text):
         return PiperXMarkerTask("home")
+    if re.search(r"\b(open|release)\b.*\b(gripper|claw|hand)\b", text):
+        return PiperXMarkerTask("open-gripper")
+    if re.search(r"\b(close|shut)\b.*\b(gripper|claw|hand)\b", text):
+        return PiperXMarkerTask("close-gripper")
     if re.search(r"\b(touch|press|tap|contact)\b", text):
         return PiperXMarkerTask("touch")
     if re.search(r"\b(approach|point|move)\b.*\b(marker|aruco|marked)\b", text):

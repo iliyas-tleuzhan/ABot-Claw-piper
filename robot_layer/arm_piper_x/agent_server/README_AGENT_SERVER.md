@@ -80,10 +80,57 @@ curl -sS -X POST http://127.0.0.1:8893/tools/touch-marker \
   | python3 -m json.tool
 ```
 
+## Gripper Tools
+
+The PiPER-X gripper uses the AgileX ROS 2 `agx_arm_ros` control topic:
+
+- topic: `/control/joint_states`
+- type: `sensor_msgs/msg/JointState`
+- joint name: `gripper`
+- position: total opening width in metres, range `[0.0, 0.1]`
+- effort: command force in newtons, range `[0.5, 3.0]`
+
+These tools do not require the wrist camera, ArUco, or point cloud. Physical
+execution still requires `PIPER_X_AGENT_ALLOW_EXECUTION=1`, an Agent Server
+lease, and an active ROS 2 driver subscriber on `/control/joint_states`.
+
+Plan-only open:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  open-gripper \
+  --plan-only
+```
+
+Plan-only close:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  close-gripper \
+  --plan-only
+```
+
+Physical open, after the driver is running and execution is intentionally
+enabled:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  open-gripper \
+  --execute
+```
+
+Physical close:
+
+```bash
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  close-gripper \
+  --execute
+```
+
 ## Current Limits
 
 The server intentionally does not expose `/code/execute`.
 
-The gripper endpoints and generic pose endpoints exist but fail closed until
-the real PiPER-X ROS 2 gripper and MoveIt pose-command contract is verified.
-Use `GET /state` to inspect discovered ROS topics, services, and actions.
+Generic pose endpoints still fail closed until the real PiPER-X MoveIt
+pose-command contract is implemented. Use `GET /state` to inspect discovered
+ROS topics, services, and actions.

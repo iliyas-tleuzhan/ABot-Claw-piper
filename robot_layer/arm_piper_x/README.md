@@ -19,6 +19,8 @@ wrapped by a PiPER-X Agent Server:
 - geometric touch marker: `POST /tools/touch-marker`
 - go to saved home pose: `POST /tools/go-home`
 - save current pose as home: `POST /tools/save-home`
+- open AgileX gripper: `POST /tools/open-gripper`
+- close AgileX gripper: `POST /tools/close-gripper`
 
 The Agent Server reads ROS 2 feedback topics for state and calls the low-level
 marker/home bridge for the already validated marker demo tools. It does not
@@ -38,6 +40,11 @@ talk directly to CAN or expose arbitrary joint commands.
 - TCP offset: `[0.0, 0.0, 0.1425, 0.0, 0.0, 0.0]`
 - arm feedback topic: `/feedback/joint_states`
 - TCP feedback topic: `/feedback/tcp_pose`
+- gripper command topic: `/control/joint_states`
+- gripper command type: `sensor_msgs/msg/JointState`
+- gripper joint name: `gripper`
+- gripper opening width range: `[0.0, 0.1] m`
+- gripper effort range: `[0.5, 3.0] N`
 - wrist camera: Intel RealSense D435i
 - color image: `/camera/camera/color/image_raw`
 - camera info: `/camera/camera/color/camera_info`
@@ -62,24 +69,29 @@ The public AgileX organization documents that `agx_arm_ros` is the ROS 2 driver
 for Piper-family arms including PiPER-X, and that `agx_arm_urdf` owns the URDF,
 Xacro, and mesh resources.
 
-## Not Yet General-Purpose
+## Current Generality Boundary
 
 This folder does not claim PiPER-X general tabletop pick/place support yet.
 Regular tabletop pick/place is still handled by `robot_layer/arm_piper`.
 
-The new Agent Server exposes fail-closed placeholders for gripper and generic
-pose commands. They must not be treated as available until the real PiPER-X ROS
-2 gripper/control interfaces and MoveIt pose validation are implemented.
+The Agent Server now supports the verified AgileX gripper width command
+interface. Generic Cartesian/joint pose endpoints still fail closed until the
+real PiPER-X MoveIt pose-command contract and workspace validation are
+implemented.
 
-Current PiPER-X skills are marker/home skills only:
+Current PiPER-X skills are:
 
 - approach ArUco marker
 - geometric touch of ArUco marker
 - save current pose as home
 - go to saved home pose
+- open gripper
+- close gripper
 
 There is no force sensor in this path. "Touch" means a geometric approach to a
 small clearance from the fitted wall surface, not force-confirmed contact.
+"Close gripper" means command the configured opening width, not confirmed
+object grasp.
 
 ## Quick Checks
 
@@ -90,6 +102,8 @@ python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py approach 
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py touch --plan-only --retract --return-home-after
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py save-home
 python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py home --plan-only
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py open-gripper --plan-only
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py close-gripper --plan-only
 ```
 
 Use `--execute` only when the ROS 2 stack health reports

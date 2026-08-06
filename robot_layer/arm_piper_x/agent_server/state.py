@@ -40,6 +40,7 @@ class PiperXStateMonitor:
         self,
         joint_state_topic: str,
         tcp_pose_topic: str,
+        gripper_control_topic: str,
         trajectory_action: str,
         marker_task_service: str,
         expected_joints: list[str],
@@ -47,6 +48,7 @@ class PiperXStateMonitor:
     ):
         self.joint_state_topic = joint_state_topic
         self.tcp_pose_topic = tcp_pose_topic
+        self.gripper_control_topic = gripper_control_topic
         self.trajectory_action = trajectory_action
         self.marker_task_service = marker_task_service
         self.expected_joints = list(expected_joints)
@@ -60,6 +62,7 @@ class PiperXStateMonitor:
         self._executor: MultiThreadedExecutor | None = None
         self._thread: threading.Thread | None = None
         self._startup_error: str | None = None
+        self._gripper_publisher = None
 
     def start(self) -> None:
         if rclpy is None:
@@ -71,6 +74,7 @@ class PiperXStateMonitor:
             self._node = rclpy.create_node("piper_x_agent_state_monitor")
             self._node.create_subscription(JointState, self.joint_state_topic, self._joint_callback, 10)
             self._node.create_subscription(PoseStamped, self.tcp_pose_topic, self._tcp_callback, 10)
+            self._gripper_publisher = self._node.create_publisher(JointState, self.gripper_control_topic, 10)
             self._executor = MultiThreadedExecutor()
             self._executor.add_node(self._node)
             self._thread = threading.Thread(target=self._executor.spin, daemon=True)
@@ -157,6 +161,37 @@ class PiperXStateMonitor:
             "tcp_pose_fresh": tcp_age is not None and tcp_age <= self.timeout_s,
         }
 
+    def command_gripper(self, joint_name: str, width_m: float, effort_n: float, repeat: int = 3) -> dict:
+        if self._node is None or self._gripper_publisher is None:
+            raise RuntimeError("ROS 2 gripper publisher is not initialized")
+        subscriber_count = self._gripper_publisher.get_subscription_count()
+        if subscriber_count < 1:
+            raise RuntimeError(
+                f"no subscribers are connected to {self.gripper_control_topic}; "
+                "start the agx_arm_ros driver with command/control enabled before executing gripper commands"
+            )
+        msg = JointState()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.name = [joint_name]
+        msg.position = [float(width_m)]
+        msg.velocity = []
+        msg.effort = [float(effort_n)]
+        for _index in range(max(1, int(repeat))):
+            msg.header.stamp = self._node.get_clock().now().to_msg()
+            self._gripper_publisher.publish(msg)
+            time.sleep(0.05)
+        return {
+            "success": True,
+            "stage": "complete",
+            "message": f"published {joint_name} gripper command to {self.gripper_control_topic}",
+            "command_topic": self.gripper_control_topic,
+            "joint_name": joint_name,
+            "target_width_m": float(width_m),
+            "effort_n": float(effort_n),
+            "publish_count": max(1, int(repeat)),
+            "subscriber_count": subscriber_count,
+        }
+
     def graph(self) -> dict:
         snapshot = self._graph_snapshot()
         interesting = ("gripper", "hand", "control", "feedback")
@@ -177,4 +212,11 @@ class PiperXStateMonitor:
             "trajectory_action_available": self.trajectory_action in snapshot.actions,
             "marker_task_service": self.marker_task_service,
             "marker_task_service_seen": any(name == self.marker_task_service for name, _ in snapshot.services_and_types),
+            "gripper_control_topic": self.gripper_control_topic,
+            "gripper_control_topic_seen": any(name == self.gripper_control_topic for name, _ in snapshot.names_and_types),
+            "gripper_control_subscribers": (
+                self._gripper_publisher.get_subscription_count()
+                if self._gripper_publisher is not None
+                else 0
+            ),
         }

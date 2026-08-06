@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, status
@@ -33,6 +34,8 @@ class SaveHomeRequest(BaseModel):
 class GripperRequest(BaseModel):
     execute: bool = False
     lease_id: Optional[str] = None
+    width_m: Optional[float] = None
+    effort_n: Optional[float] = None
 
 
 class PoseRequest(BaseModel):
@@ -61,7 +64,7 @@ def _normalize_marker_api_response(status_code: int, result: Dict[str, Any]) -> 
     return result
 
 
-def create_router(cfg, sdk, lease_mgr) -> APIRouter:
+def create_router(cfg, sdk, lease_mgr, state_monitor) -> APIRouter:
     router = APIRouter(prefix="/tools", tags=["tools"])
 
     def require_execution_allowed(execute: bool, lease_id: str | None) -> None:
@@ -79,6 +82,65 @@ def create_router(cfg, sdk, lease_mgr) -> APIRouter:
         ok, detail = lease_mgr.require(lease_id)
         if not ok:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"success": False, **detail})
+
+    def validated_gripper_values(req: GripperRequest, default_width_m: float) -> tuple[float, float]:
+        width_m = default_width_m if req.width_m is None else float(req.width_m)
+        effort_n = cfg.gripper_default_effort_n if req.effort_n is None else float(req.effort_n)
+        if not math.isfinite(width_m) or width_m < 0.0 or width_m > 0.1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "stage": "request_validation",
+                    "message": "gripper width_m must be finite and in [0.0, 0.1] metres",
+                },
+            )
+        if not math.isfinite(effort_n) or effort_n < 0.5 or effort_n > 3.0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "stage": "request_validation",
+                    "message": "gripper effort_n must be finite and in [0.5, 3.0] N",
+                },
+            )
+        return width_m, effort_n
+
+    def run_gripper(req: GripperRequest, target_name: str, default_width_m: float) -> Dict[str, Any]:
+        width_m, effort_n = validated_gripper_values(req, default_width_m)
+        require_execution_allowed(req.execute, req.lease_id)
+        result = {
+            "success": True,
+            "stage": "complete",
+            "message": f"{target_name} gripper command is valid" + (" and was published" if req.execute else " (execute=false)"),
+            "execution_attempted": bool(req.execute),
+            "command_topic": cfg.gripper_control_topic,
+            "message_type": "sensor_msgs/msg/JointState",
+            "joint_name": cfg.gripper_joint_name,
+            "target_width_m": width_m,
+            "effort_n": effort_n,
+            "camera_required": False,
+        }
+        if not req.execute:
+            return result
+        try:
+            result.update(state_monitor.command_gripper(cfg.gripper_joint_name, width_m, effort_n))
+            result["execution_attempted"] = True
+            return result
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "success": False,
+                    "stage": "gripper_execution",
+                    "message": str(exc),
+                    "execution_attempted": True,
+                    "command_topic": cfg.gripper_control_topic,
+                    "joint_name": cfg.gripper_joint_name,
+                    "target_width_m": width_m,
+                    "effort_n": effort_n,
+                },
+            ) from exc
 
     def proxy_marker_task(endpoint: str, request: MarkerTaskRequest) -> Dict[str, Any]:
         require_execution_allowed(request.execute, request.lease_id)
@@ -121,27 +183,11 @@ def create_router(cfg, sdk, lease_mgr) -> APIRouter:
 
     @router.post("/open-gripper")
     def open_gripper(req: GripperRequest):
-        require_execution_allowed(req.execute, req.lease_id)
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "success": False,
-                "stage": "gripper_interface",
-                "message": "PiPER-X gripper command endpoint is not enabled because no verified ROS 2 gripper command topic/service was found.",
-            },
-        )
+        return run_gripper(req, "open", cfg.gripper_open_width_m)
 
     @router.post("/close-gripper")
     def close_gripper(req: GripperRequest):
-        require_execution_allowed(req.execute, req.lease_id)
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "success": False,
-                "stage": "gripper_interface",
-                "message": "PiPER-X gripper command endpoint is not enabled because no verified ROS 2 gripper command topic/service was found.",
-            },
-        )
+        return run_gripper(req, "close", cfg.gripper_close_width_m)
 
     @router.post("/plan-to-pose")
     def plan_to_pose(req: PoseRequest):

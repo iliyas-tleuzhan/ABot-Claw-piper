@@ -73,7 +73,13 @@ def marker_payload(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def command_needs_lease(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "execute", False)) and args.command in {"approach", "touch", "home"}
+    return bool(getattr(args, "execute", False)) and args.command in {
+        "approach",
+        "touch",
+        "home",
+        "open-gripper",
+        "close-gripper",
+    }
 
 
 def main() -> int:
@@ -108,6 +114,13 @@ def main() -> int:
     home.add_argument("--duration", type=float, default=6.0)
     save_home = subparsers.add_parser("save-home")
     save_home.add_argument("--pose-name", default="home")
+    for name in ("open-gripper", "close-gripper"):
+        gripper = subparsers.add_parser(name)
+        gripper.add_argument("--execute", action="store_true")
+        gripper.add_argument("--plan-only", action="store_true")
+        gripper.add_argument("--lease-id")
+        gripper.add_argument("--width-m", type=float)
+        gripper.add_argument("--effort-n", type=float)
 
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
@@ -148,6 +161,14 @@ def main() -> int:
             return print_result(
                 *request_json("POST", f"{base_url}/tools/save-home", {"pose_name": args.pose_name})
             )
+        if args.command in {"open-gripper", "close-gripper"}:
+            payload = {
+                "execute": args.execute,
+                "lease_id": args.lease_id,
+                "width_m": args.width_m,
+                "effort_n": args.effort_n,
+            }
+            return print_result(*request_json("POST", f"{base_url}/tools/{args.command}", payload))
         endpoint = "approach-marker" if args.command == "approach" else "touch-marker"
         return print_result(*request_json("POST", f"{base_url}/tools/{endpoint}", marker_payload(args)))
     finally:

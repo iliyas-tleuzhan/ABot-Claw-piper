@@ -40,6 +40,18 @@ class PiperXMarkerParserTest(unittest.TestCase):
         self.assertEqual(parsed["action"], "save-home")
         self.assertIn("save-home", parsed["command_text"])
 
+    def test_open_gripper_routes_to_gripper_tool(self):
+        parsed = self.parse("open the gripper")
+        self.assertEqual(parsed["action"], "open-gripper")
+        self.assertIn("open-gripper", parsed["command_text"])
+        self.assertIn("--plan-only", parsed["command_text"])
+
+    def test_close_gripper_routes_to_gripper_tool(self):
+        parsed = self.parse("close the claw")
+        self.assertEqual(parsed["action"], "close-gripper")
+        self.assertIn("close-gripper", parsed["command_text"])
+        self.assertEqual(parsed["completion_type"], "gripper_width_command")
+
 
 if __name__ == "__main__":
     unittest.main()

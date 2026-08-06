@@ -27,6 +27,7 @@ def build_app(cfg=None, sdk=None, state_monitor=None, lease_mgr=None) -> FastAPI
     state_monitor = state_monitor or PiperXStateMonitor(
         joint_state_topic=cfg.joint_state_topic,
         tcp_pose_topic=cfg.tcp_pose_topic,
+        gripper_control_topic=cfg.gripper_control_topic,
         trajectory_action=cfg.trajectory_action,
         marker_task_service=cfg.marker_task_service,
         expected_joints=cfg.expected_joints,
@@ -54,7 +55,7 @@ def build_app(cfg=None, sdk=None, state_monitor=None, lease_mgr=None) -> FastAPI
 
     app.include_router(state_router(cfg, state_monitor, sdk, lease_mgr))
     app.include_router(lease_router(lease_mgr))
-    app.include_router(tool_router(cfg, sdk, lease_mgr))
+    app.include_router(tool_router(cfg, sdk, lease_mgr, state_monitor))
 
     @app.on_event("startup")
     def startup():

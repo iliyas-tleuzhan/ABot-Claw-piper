@@ -1,6 +1,6 @@
 ---
 name: abotclaw-piper-x-manipulation
-description: Route PiPER-X marker and home-pose commands through the PiPER-X Agent Server on 127.0.0.1:8893. Use when the user asks the PiPER-X arm to approach/touch ArUco marker 6, press the marked location, go home, or save the current pose as home.
+description: Route PiPER-X marker, home-pose, and gripper commands through the PiPER-X Agent Server on 127.0.0.1:8893. Use when the user asks the PiPER-X arm to approach/touch ArUco marker 6, press the marked location, go home, save the current pose as home, open the gripper, or close the gripper.
 ---
 
 # AbotClaw PiPER-X Manipulation
@@ -20,6 +20,10 @@ workcell stack.
 - MoveIt tip/TCP: `tcp_link`
 - TCP offset: `[0.0, 0.0, 0.1425, 0.0, 0.0, 0.0]`
 - Joint feedback: `/feedback/joint_states`
+- Gripper command: `/control/joint_states`
+- Gripper joint: `gripper`
+- Gripper width range: `[0.0, 0.1] m`
+- Gripper effort range: `[0.5, 3.0] N`
 - Wrist camera: Intel RealSense D435i
 - Point cloud: `/camera/camera/depth/color/points`
 - ArUco pose: `/aruco_single/pose`
@@ -64,6 +68,17 @@ For `go home`, marker and point-cloud readiness are not required. Require:
 For `save current pose as home`, require fresh joint state. This command does
 not move the robot.
 
+For `open gripper` and `close gripper`, marker, point-cloud, and camera
+readiness are not required. Require:
+
+- `ros_ok: true`
+- `gripper_control.supported: true`
+- an active ROS 2 driver subscriber on `/control/joint_states` for physical
+  execution
+- `execution_allowed: true` for physical execution
+- a valid `/lease/acquire` lease for physical execution through the Agent
+  Server
+
 ## Routing
 
 For "approach the marker", "point at the marker", or "move to the marker":
@@ -105,6 +120,24 @@ python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
   save-home
 ```
 
+For "open the gripper", "release the gripper", or "open the claw":
+
+```bash
+cd /home/dase-hw101/ABot-Claw &&
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  open-gripper \
+  --execute
+```
+
+For "close the gripper", "close the claw", or "shut the gripper":
+
+```bash
+cd /home/dase-hw101/ABot-Claw &&
+python3 robot_layer/arm_piper_x/agent_server/run_piper_x_agent_task.py \
+  close-gripper \
+  --execute
+```
+
 ## Parser
 
 Use `scripts/piper_x_marker_task.py` to classify language into one of:
@@ -113,6 +146,8 @@ Use `scripts/piper_x_marker_task.py` to classify language into one of:
 - `touch`
 - `home`
 - `save-home`
+- `open-gripper`
+- `close-gripper`
 
 Example:
 
@@ -129,6 +164,8 @@ python3 /home/dase-hw101/.openclaw/workspace/skills/abotclaw-piper-x-manipulatio
 - Treat `127.0.0.1:8892` as the lower-level marker/home bridge, not the OpenClaw-facing Agent Server.
 - Do not import or call regular Piper `piper_sdk` from this skill.
 - Do not generate arbitrary joint, CAN, gripper, or MoveIt code.
+- For gripper commands, use only `/tools/open-gripper` and
+  `/tools/close-gripper`; do not publish ROS messages directly from OpenClaw.
 - Do not retry physical commands automatically.
 - Do not call `execute=true` when `/health` reports `execution_allowed=false`.
 - Report the exact failed `stage` and `message` returned by the API.

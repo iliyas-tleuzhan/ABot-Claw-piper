@@ -53,6 +53,10 @@ class FakeSdk:
 
 
 class FakeStateMonitor:
+    def __init__(self, gripper_subscribers=True):
+        self.gripper_commands = []
+        self.gripper_subscribers = gripper_subscribers
+
     def start(self):
         pass
 
@@ -73,46 +77,62 @@ class FakeStateMonitor:
             "topics": [],
             "services": [],
             "actions": ["/arm_controller/follow_joint_trajectory"],
+            "gripper_control_topic_seen": True,
+            "gripper_control_subscribers": 1 if self.gripper_subscribers else 0,
+        }
+
+    def command_gripper(self, joint_name, width_m, effort_n):
+        if not self.gripper_subscribers:
+            raise RuntimeError("no subscribers are connected to /control/joint_states")
+        self.gripper_commands.append((joint_name, width_m, effort_n))
+        return {
+            "success": True,
+            "stage": "complete",
+            "message": "published",
+            "joint_name": joint_name,
+            "target_width_m": width_m,
+            "effort_n": effort_n,
         }
 
 
-def make_client(execution_allowed=False):
+def make_client(execution_allowed=False, gripper_subscribers=True):
     cfg = PiperXAgentConfig()
     sdk = FakeSdk()
-    app = build_app(cfg=cfg, sdk=sdk, state_monitor=FakeStateMonitor(), lease_mgr=LeaseManager())
+    state_monitor = FakeStateMonitor(gripper_subscribers=gripper_subscribers)
+    app = build_app(cfg=cfg, sdk=sdk, state_monitor=state_monitor, lease_mgr=LeaseManager())
     env_value = "1" if execution_allowed else ""
-    return TestClient(app), sdk, env_value
+    return TestClient(app), sdk, env_value, state_monitor
 
 
 class PiperXAgentServerTest(unittest.TestCase):
     def test_health_reports_agent(self):
-        client, _sdk, _env = make_client()
+        client, _sdk, _env, _state = make_client()
         result = client.get("/health")
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["agent"], "piper_x_agent_server")
 
     def test_plan_only_approach_does_not_require_lease(self):
-        client, sdk, _env = make_client()
+        client, sdk, _env, _state = make_client()
         result = client.post("/tools/approach-marker", json={"execute": False})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(sdk.calls[0][0], "approach")
         self.assertFalse(sdk.calls[0][1]["execute"])
 
     def test_execute_blocked_without_agent_gate(self):
-        client, _sdk, _env = make_client()
+        client, _sdk, _env, _state = make_client()
         result = client.post("/tools/touch-marker", json={"execute": True})
         self.assertEqual(result.status_code, 403)
         self.assertEqual(result.json()["detail"]["stage"], "execution_gate")
 
     def test_execute_requires_lease_when_gate_enabled(self):
-        client, _sdk, _env = make_client(execution_allowed=True)
+        client, _sdk, _env, _state = make_client(execution_allowed=True)
         with patch.dict(os.environ, {"PIPER_X_AGENT_ALLOW_EXECUTION": "1"}):
             result = client.post("/tools/touch-marker", json={"execute": True})
         self.assertEqual(result.status_code, 409)
         self.assertEqual(result.json()["detail"]["stage"], "lease")
 
     def test_execute_with_lease_proxies_touch(self):
-        client, sdk, _env = make_client(execution_allowed=True)
+        client, sdk, _env, _state = make_client(execution_allowed=True)
         with patch.dict(os.environ, {"PIPER_X_AGENT_ALLOW_EXECUTION": "1"}):
             lease = client.post("/lease/acquire", json={"holder": "test"}).json()["lease_id"]
             result = client.post(
@@ -124,19 +144,50 @@ class PiperXAgentServerTest(unittest.TestCase):
         self.assertEqual(sdk.calls[0][1]["lease_id"] if "lease_id" in sdk.calls[0][1] else None, None)
 
     def test_save_home_proxies_without_execution_lease(self):
-        client, sdk, _env = make_client()
+        client, sdk, _env, _state = make_client()
         result = client.post("/tools/save-home", json={"pose_name": "home"})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(sdk.calls[0][0], "save-home")
 
-    def test_gripper_fails_closed(self):
-        client, _sdk, _env = make_client()
+    def test_open_gripper_plan_only_reports_command_without_publish(self):
+        client, _sdk, _env, state = make_client()
         result = client.post("/tools/open-gripper", json={"execute": False})
-        self.assertEqual(result.status_code, 501)
-        self.assertEqual(result.json()["detail"]["stage"], "gripper_interface")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["target_width_m"], 0.10)
+        self.assertFalse(result.json()["execution_attempted"])
+        self.assertEqual(state.gripper_commands, [])
+
+    def test_close_gripper_execute_publishes_with_lease(self):
+        client, _sdk, _env, state = make_client(execution_allowed=True)
+        with patch.dict(os.environ, {"PIPER_X_AGENT_ALLOW_EXECUTION": "1"}):
+            lease = client.post("/lease/acquire", json={"holder": "test"}).json()["lease_id"]
+            result = client.post("/tools/close-gripper", json={"execute": True, "lease_id": lease})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(state.gripper_commands, [("gripper", 0.0, 1.0)])
+
+    def test_gripper_invalid_width_rejected(self):
+        client, _sdk, _env, _state = make_client()
+        result = client.post("/tools/open-gripper", json={"execute": False, "width_m": 0.2})
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(result.json()["detail"]["stage"], "request_validation")
+
+    def test_gripper_execute_requires_gate(self):
+        client, _sdk, _env, _state = make_client()
+        result = client.post("/tools/open-gripper", json={"execute": True})
+        self.assertEqual(result.status_code, 403)
+        self.assertEqual(result.json()["detail"]["stage"], "execution_gate")
+
+    def test_gripper_execute_requires_ros_driver_subscriber(self):
+        client, _sdk, _env, _state = make_client(execution_allowed=True, gripper_subscribers=False)
+        with patch.dict(os.environ, {"PIPER_X_AGENT_ALLOW_EXECUTION": "1"}):
+            lease = client.post("/lease/acquire", json={"holder": "test"}).json()["lease_id"]
+            result = client.post("/tools/open-gripper", json={"execute": True, "lease_id": lease})
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.json()["detail"]["stage"], "gripper_execution")
+        self.assertIn("/control/joint_states", result.json()["detail"]["message"])
 
     def test_generic_move_to_pose_fails_closed(self):
-        client, _sdk, _env = make_client()
+        client, _sdk, _env, _state = make_client()
         result = client.post(
             "/tools/move-to-pose",
             json={

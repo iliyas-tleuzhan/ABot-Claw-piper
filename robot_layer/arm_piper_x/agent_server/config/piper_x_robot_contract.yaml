@@ -29,6 +29,18 @@ moveit:
   tcp_offset: [0.0, 0.0, 0.1425, 0.0, 0.0, 0.0]
   feedback_topic: /feedback/joint_states
   tcp_feedback_topic: /feedback/tcp_pose
+  gripper_control:
+    topic: /control/joint_states
+    message_type: sensor_msgs/msg/JointState
+    joint_name: gripper
+    position_semantics: total opening width in metres
+    width_range_m: [0.0, 0.1]
+    default_open_width_m: 0.10
+    default_close_width_m: 0.0
+    effort_range_n: [0.5, 3.0]
+    default_effort_n: 1.0
+    camera_required: false
+    source: /home/dase-hw101/agx_arm_ws/src/agx_arm_ros/README_EN.md
   controller:
     action: /arm_controller/follow_joint_trajectory
     joints: [joint1, joint2, joint3, joint4, joint5, joint6]
@@ -75,6 +87,8 @@ local_http_api:
   touch_marker: /tools/touch-marker
   go_home: /tools/go-home
   save_home: /tools/save-home
+  open_gripper: /tools/open-gripper
+  close_gripper: /tools/close-gripper
 safety_boundary:
   default_physical_execution: disabled unless PIPER_X_AGENT_ALLOW_EXECUTION and the low-level marker API execution gate are both enabled
   contact_confirmation: false
